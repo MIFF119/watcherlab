@@ -1,0 +1,1583 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>THE TREELINE - WATCHER LAB</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:Menlo,Consolas,monospace;color:#e8e1cc}
+#c{position:fixed;left:0;top:0;width:100%;height:100%;display:block;touch-action:none;cursor:crosshair}
+#start{position:fixed;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55)}
+#start .box{text-align:center;max-width:560px;padding:20px}
+#start h1{font-size:44px;letter-spacing:14px;margin:0 0 10px 14px;font-weight:normal}
+#start .sub{opacity:.55;font-size:13px;letter-spacing:2px;margin:0 0 28px 0}
+#start .hint{opacity:.45;font-size:12px;line-height:1.7;margin-top:26px}
+button{font:inherit;font-size:18px;letter-spacing:4px;background:#000;color:#e8e1cc;border:1px solid #e8e1cc;padding:14px 26px;margin:6px;cursor:pointer}
+button:hover{background:#e8e1cc;color:#000}
+#fps{position:fixed;right:10px;top:10px;font-size:12px;background:rgba(0,0,0,.7);padding:4px 8px;display:none}
+#lab{position:fixed;left:10px;top:10px;font-size:12px;background:rgba(0,0,0,.72);padding:10px 12px;max-width:430px;display:none;line-height:1.5}
+#lab b{letter-spacing:3px}
+#lab .row{margin-top:6px}
+#lab button{font-size:11px;letter-spacing:1px;padding:5px 8px;margin:2px 3px 2px 0}
+#lab button.on{background:#e8e1cc;color:#000}
+#labInfo{margin-top:8px;opacity:.75;max-width:410px}
+#lock{position:fixed;left:0;right:0;bottom:24px;text-align:center;font-size:12px;opacity:.5;display:none;letter-spacing:2px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="start"><div class="box">
+  <h1>WATCHER LAB</h1>
+  <p class="sub">THE TREELINE &middot; FIVE THINGS THAT MIGHT BE STANDING IN THE TREES</p>
+  <button id="go">WALK IN</button>
+  <button id="vr" style="display:none">ENTER VR</button>
+  <p class="hint">desktop: click to look &middot; WASD walk &middot; 0 lineup &middot; 1-5 one type &middot; Z distance &middot; B pose &middot; P PS1/PS2 &middot; V clay/void/shaded &middot; E eyes &middot; H silence<br>
+  Oculus Go: hold to walk &middot; tap = next type &middot; double-tap = other pose<br>look at your feet + tap = distance &middot; look at your feet + double-tap = next look (style / clay / void / shaded / eyes)</p>
+</div></div>
+<div id="fps">-- fps</div>
+<div id="lock">CLICK TO LOOK AROUND</div>
+<div id="lab"><b>WATCHER LAB</b>
+  <div class="row" id="labTypes"></div>
+  <div class="row" id="labDist"></div>
+  <div class="row" id="labLook"></div>
+  <div id="labInfo"></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js"></script>
+<script>
+(function () {
+'use strict';
+var T = THREE;
+
+/* ============================================================
+   THE TREELINE  -  stage 1: forest + 1-bit night look + walking
+
+   Every number you might want to tune lives in CONFIG.
+   Later stages add CONFIG.sound, CONFIG.follower, CONFIG.watcher,
+   CONFIG.director here too, so there's one place to tweak the fear.
+   ============================================================ */
+var CONFIG = {
+  world: {
+    tile: 80,            // metres. The whole forest is ONE 80x80m tile repeated forever. This IS the loop.
+    drawRadius: 22,      // only stuff within this many metres gets drawn (the fog is solid black by 20)
+    smallRadius: 15,     // ferns and twigs are tiny, so they get culled sooner
+    groundStep: 0.5,     // ground mesh vertex spacing (smaller = smoother path edges, more triangles)
+    groundSnap: 2,       // the ground mesh re-centres on you every N metres
+    repackStep: 1        // the instance lists get rebuilt after you walk this far
+  },
+  style: 'ps1',          // look to start in: 'ps1', 'ps2' or 'onebit'. Desktop keys 1/2/3 swap live.
+  /* Each style is just data, like STYLE LAB: colours, lights, fog, shader tricks.
+     pal = surface colours. Night comes from the LIGHTS being dim, not from painting things black.
+     fog = the colour things dissolve into. sky = [top, horizon, bottom]. skyCurve = how tightly the
+     sky glow hugs the top. moon/hemi/flash = [colour, intensity]. blob = [shadow mode, opacity]. */
+  styles: {
+    ps1: {
+      name: 'PS1',
+      fog: '#05060a', sky: ['#121a30', '#05060a', '#05060a'], skyCurve: 1.2,
+      moon: ['#7d8cff', 0.22], hemi: ['#3a4670', '#0a0806', 0.14], flash: ['#ffe2b0', 2.2],
+      patch: { snap: true, affine: true, dither: 1 }, levels: 24,   // wobbly verts, warpy textures, colour crunch
+      tex: { size: 32, nearest: true },                              // tiny crunchy textures
+      pixelH: 240, smooth: false, vignette: 0.3, outline: false, blob: [1, 0.5],
+      pal: { pine: '#4d3626', birch: '#d8d2c4', snag: '#7a7066', stub: '#3e2c20', canopy: '#020306', stump: '#6b5236',
+        rock: '#6e737a', bush: '#26331f', fern: '#4f7a3a', log: '#5a4430', stick: '#7a6448', litter: '#4a3f2c', path: '#8a7556' }
+    },
+    ps2: {
+      name: 'PS2',
+      fog: '#07080b', sky: ['#1a2133', '#07080b', '#07080b'], skyCurve: 1.2,
+      moon: ['#8a9cff', 0.25], hemi: ['#3c4660', '#0b0907', 0.15], flash: ['#fff0cc', 2.2],
+      patch: { dither: 0 }, levels: 24,                              // smooth shading, no wobble
+      tex: { size: 128, nearest: false },                            // softer, bigger textures
+      pixelH: 448, smooth: true, vignette: 0.45, outline: false, blob: [0, 0.4],  // blurry upscale = very PS2
+      pal: { pine: '#5a4030', birch: '#e0d8c8', snag: '#857a6c', stub: '#4a3628', canopy: '#030407', stump: '#7a5e40',
+        rock: '#7d7a74', bush: '#2e3b25', fern: '#5f7f3f', log: '#66503a', stick: '#86704f', litter: '#55492f', path: '#97805c' }
+    },
+    onebit: {
+      name: '1-BIT',
+      fog: '#000000', sky: ['#4d4d4d', '#000000', '#000000'], skyCurve: 6,
+      moon: ['#c8d4ff', 0.25], hemi: ['#9aa4b8', '#000000', 0.06], flash: ['#ffffff', 1.8],
+      patch: { dither: 2 }, levels: 24, tex: null,
+      pixelH: 300, smooth: false, vignette: 0, outline: true, blob: [2, 0.55],
+      pal: { pine: '#6b6b6b', birch: '#dedede', snag: '#a1a1a1', stub: '#808080', canopy: '#1c1a2b', stump: '#8f8f8f',
+        rock: '#9e9e9e', bush: '#525252', fern: '#949494', log: '#808080', stick: '#9e9e9e', litter: '#666666', path: '#c7c7c7' }
+    }
+  },
+  look: {
+    ink: '#1c1a2b',      // 1-bit ink + paper (same as STYLE LAB)
+    paper: '#e8e1cc',
+    outline: 0.03,       // 1-bit inverted-hull outline thickness in metres
+    fogNear: 3,          // fog starts here...
+    fogFar: 20,          // ...and things are fully gone by here
+    desktopFov: 70,
+    vrFoveation: 1,      // 0..1 fixed foveated rendering in VR (renders the blurry lens edges cheaper)
+    antialias: true
+  },
+  moon: {
+    dir: [0.45, 1, 0.25] // where the moon is (direction it shines FROM). Colour/strength are per style.
+  },
+  flashlight: {
+    range: 22,           // light fades linearly to nothing at this distance
+    angle: 0.36,         // half-angle of the cone in radians (~20 degrees, narrow)
+    penumbra: 0.55,      // soft edge of the cone, 0 = razor edge
+    offset: [0.12, -0.28, 0], // held a bit right and below your eyes
+    flickerMinGap: 25,   // seconds between random flickers
+    flickerMaxGap: 75,
+    flickerDepth: 0.55   // how dark a random flicker can dip (0..1). The scare director can go harder later.
+  },
+  walk: {
+    speed: 1.2,          // m/s. Slow is scary.
+    accel: 2.5,          // how fast you ease in/out of walking
+    eyeHeight: 1.6,
+    stride: 0.72,        // metres per footstep (stage 2 hangs footstep sounds on this)
+    playerRadius: 0.35,  // how close you can get to a trunk
+    mouseSens: 0.0022,
+    desktopRunMultiplier: 4  // hold Shift on desktop to zoom around while testing. Not in VR.
+  },
+  forest: {
+    seed: 7,             // change this for a totally different forest
+    treeCell: 2.5,       // one tree per 2.5x2.5m cell (roughly). Must divide the tile evenly.
+    treeChance: 0.85,
+    clusterChance: 0.35, // dense patches get a second tree in the cell
+    birch: 0.22,         // fraction of trees that are pale birches
+    dead: 0.13,          // fraction that are dead, branchless, broken-off snags
+    leanChance: 0.1,     // fraction that lean hard
+    stumps: 70, rocks: 90, bushes: 220, ferns: 900, logs: 45, sticks: 1300,
+    fernSway: 0.18,
+    branchStubs: true,   // dead branch stubs on pines (+1 draw call). Turn off if the Go struggles.
+    canopy: true         // dark canopy silhouettes way up top (+1 draw call)
+  },
+  path: {
+    width: 0.55,         // half-width of the dirt path in metres
+    widthVar: 0.25,      // it pinches and widens
+    clearance: 0.75,     // how far trees keep back from the path edge
+    wander: [6, 3, 1.5], // how much it winds (three layered curves)
+    fade: 0.7            // how faint it gets in the "where did the path go" stretches
+  },
+  sound: {
+    master: 1.2,         // overall volume. The mix is quiet on purpose: rare sounds (stage 3+) will cut through it.
+    hrtf: true,          // 3D "inside your head" positioning. false = cheaper basic left/right panning if the Go struggles.
+    wind: {
+      volume: 0.5,       // the low whoosh
+      rustle: 0.28,      // leaves hissing in the canopy, only really comes in during strong gusts
+      sources: 4,        // wind "speakers" placed around you up in the treetops. Gusts roll from one to the next.
+      distance: 10,      // how far away they sit (metres)
+      height: 9          // how high up (it's the canopy moving, not the ground)
+    },
+    drone: {
+      start: 0.0,        // drone volume when you first walk in
+      max: 0.5,          // where it ends up after a long walk
+      rampSeconds: 240,  // seconds of walking to get ~63% of the way there
+      recover: 0.3,      // standing still unwinds it at 30% of the speed walking winds it up
+      freq: 36           // Hz. Sub-bass: felt more than heard (phone/Go speakers mostly hear the harmonics)
+    },
+    steps: {
+      volume: 0.85,
+      twigVolume: 1.0,
+      twigRadius: 0.45,  // step within this many metres of a stick on the ground = SNAP
+      hiddenTwigChance: 0.05  // and sometimes there's one hiding under the leaves
+    },
+    crickets: { count: 5, volume: 0.35, minDist: 5, maxDist: 16 },
+    owls: { volume: 0.5, minGap: 25, maxGap: 70, minDist: 16, maxDist: 32 },
+    hush: { fadeOut: 0.3, fadeIn: 6 }   // the forest going silent: how fast it stops, how slowly it creeps back
+  },
+  debug: { showFps: true }
+};
+
+// ---------- tiny seeded random so the forest is the same every load (from STYLE LAB)
+var seed = 1337;
+function rnd() { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; }
+function rr(a, b) { return a + (b - a) * rnd(); }
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+// runtime randomness uses Math.random instead, so scares are never the same twice
+function mr(a, b) { return a + (b - a) * Math.random(); }
+function smoothstep(a, b, x) { var t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); }
+function mod(a, n) { return ((a % n) + n) % n; }
+
+/* ============================================================
+   STYLE LAB CODE (copied): uniforms, Bayer dither, patch(), hulls
+   ============================================================ */
+
+// ---------- uniforms shared by every patched shader (same object refs)
+var U = {
+  uTime: { value: 0 },
+  uSnapRes: { value: new T.Vector2(320, 240) },
+  uLevels: { value: 24 },
+  uInk: { value: new T.Color(CONFIG.look.ink) },
+  uPaper: { value: new T.Color(CONFIG.look.paper) },
+  uOutline: { value: CONFIG.look.outline }
+};
+
+// Ordered (Bayer) dither threshold, 0..1. mod() keeps it precise on big screens.
+var BAYER = [
+  'float bay2(vec2 a){ a = mod(floor(a), 2.0); return fract(a.x*0.5 + a.y*a.y*0.75); }',
+  'float bay4(vec2 a){ return bay2(0.5*a)*0.25 + bay2(a); }',
+  'float bay8(vec2 a){ return bay4(0.5*a)*0.25 + bay2(a); }',
+  ''
+].join('\n');
+
+/* ---------- the shader hacks ----------
+   snap   : PS1 vertex wobble. Rounds each vertex to a low-res pixel grid.
+   affine : PS1 texture warp. Undoes perspective-correct texture mapping.
+   dither : 1 = colour crunch with ordered dither, 2 = pure 1-bit (two colours).
+   door   : "screen-door" transparency (holes in a pattern instead of blending).
+   sway   : wind wobble for grass / leaves, scaled by height.
+   radialFog (NEW for THE TREELINE): fog by true distance instead of screen depth,
+            so a tree doesn't get clearer just because you turned your head. */
+function patch(m, o) {
+  var key = JSON.stringify(o);
+  m.customProgramCacheKey = function () { return key; };
+  m.onBeforeCompile = function (sh) {
+    sh.uniforms.uTime = U.uTime; sh.uniforms.uSnapRes = U.uSnapRes;
+    sh.uniforms.uLevels = U.uLevels; sh.uniforms.uInk = U.uInk; sh.uniforms.uPaper = U.uPaper;
+    var vs = sh.vertexShader, fs = sh.fragmentShader;
+    vs = 'uniform float uTime;\nuniform vec2 uSnapRes;\n' + (o.affine ? 'varying float vAffW;\n' : '') + vs;
+    fs = 'uniform float uLevels;\nuniform vec3 uInk;\nuniform vec3 uPaper;\n' + (o.affine ? 'varying float vAffW;\n' : '') + BAYER + fs;
+    if (o.sway) {
+      vs = vs.replace('#include <begin_vertex>',
+        '#include <begin_vertex>\n' +
+        '#ifdef USE_INSTANCING\n vec2 swp = vec2(instanceMatrix[3].x, instanceMatrix[3].z);\n#else\n vec2 swp = vec2(0.0);\n#endif\n' +
+        'float sw = sin(uTime*1.7 + swp.x*0.35 + swp.y*0.25) + 0.4*sin(uTime*3.3 + swp.x*0.9);\n' +
+        'transformed.x += sw * max(position.y, 0.0) * ' + o.sway.toFixed(3) + ';\n' +
+        'transformed.z += sw * 0.5 * max(position.y, 0.0) * ' + o.sway.toFixed(3) + ';\n');
+    }
+    var pv = '#include <project_vertex>\n';
+    if (o.snap) pv += '{ vec2 sn = uSnapRes * 0.5; gl_Position.xy = floor(gl_Position.xy / gl_Position.w * sn + 0.5) / sn * gl_Position.w; }\n';
+    if (o.affine) pv += '#ifdef USE_UV\n vUv *= gl_Position.w;\n#endif\n vAffW = gl_Position.w;\n';
+    vs = vs.replace('#include <project_vertex>', pv);
+    if (o.radialFog) vs = vs.replace('#include <fog_vertex>', '#ifdef USE_FOG\n vFogDepth = length(mvPosition.xyz);\n#endif\n');
+    if (o.affine) fs = fs.replace('#include <map_fragment>', '#ifdef USE_MAP\n diffuseColor *= texture2D(map, vUv / vAffW);\n#endif\n');
+    var df = '#include <dithering_fragment>\n';
+    if (o.door) df += 'if (bay4(gl_FragCoord.xy) > ' + o.door.toFixed(3) + ') discard;\n';
+    if (o.dither === 1) df += '{ float bt = bay4(gl_FragCoord.xy); gl_FragColor.rgb = clamp(floor(gl_FragColor.rgb * uLevels + bt) / uLevels, 0.0, 1.0); }\n';
+    if (o.dither === 2) df += '{ float l = dot(gl_FragColor.rgb, vec3(0.299, 0.587, 0.114)); l = clamp((l - 0.5) * 1.25 + 0.5, 0.0, 1.0); gl_FragColor.rgb = mix(uInk, uPaper, step(bay8(gl_FragCoord.xy) + 0.001, l)); }\n';
+    fs = fs.replace('#include <dithering_fragment>', df);
+    sh.vertexShader = vs; sh.fragmentShader = fs;
+  };
+  return m;
+}
+
+// Outlines: the "inverted hull" trick. A copy of the mesh, pushed outward
+// along its normals, drawn inside-out in solid ink. Cheap and works in VR.
+function makeHullMat(color) {
+  var m = new T.MeshBasicMaterial({ color: new T.Color(color), side: T.BackSide });
+  m.onBeforeCompile = function (sh) {
+    sh.uniforms.uOutline = U.uOutline;
+    sh.vertexShader = 'uniform float uOutline;\nattribute vec3 hullNormal;\n' +
+      sh.vertexShader.replace('#include <begin_vertex>', 'vec3 transformed = position + hullNormal * uOutline;');
+  };
+  m.customProgramCacheKey = function () { return 'hull'; };
+  return m;
+}
+// Hard-edged boxes have split normals, which would crack the outline at corners.
+// Average normals of vertices in the same spot so the hull stays closed.
+function addHullNormals(g) {
+  if (g.attributes.hullNormal) return;
+  var p = g.attributes.position, n = g.attributes.normal, acc = {}, i, k;
+  var out = new Float32Array(p.count * 3);
+  function key(i) { return Math.round(p.getX(i) * 1000) + ',' + Math.round(p.getY(i) * 1000) + ',' + Math.round(p.getZ(i) * 1000); }
+  for (i = 0; i < p.count; i++) {
+    k = key(i); if (!acc[k]) acc[k] = [0, 0, 0];
+    acc[k][0] += n.getX(i); acc[k][1] += n.getY(i); acc[k][2] += n.getZ(i);
+  }
+  for (i = 0; i < p.count; i++) {
+    var a = acc[key(i)], l = Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]) || 1;
+    out[i * 3] = a[0] / l; out[i * 3 + 1] = a[1] / l; out[i * 3 + 2] = a[2] / l;
+  }
+  g.setAttribute('hullNormal', new T.BufferAttribute(out, 3));
+}
+
+// The hull material. One change from STYLE LAB: fog off. The night fog is black, but
+// the outline is ink, and ink must stay ink or distant trunks get a darker "halo".
+var hullMat = makeHullMat(CONFIG.look.ink);
+hullMat.fog = false;
+
+// ---------- procedural detail textures (greyscale, tinted by the palette colour) - from STYLE LAB
+function detailTex(kind, size, nearest, rep) {
+  var c = document.createElement('canvas'); c.width = c.height = size;
+  var x = c.getContext('2d'), img = x.createImageData(size, size), d = img.data;
+  seed = 1000 + kind.length * 97 + kind.charCodeAt(0) * 13 + size;
+  var f = size / 32, i, j, n;
+  function put(i, j, v) { i = ((Math.floor(i) % size) + size) % size; j = ((Math.floor(j) % size) + size) % size; var k = (j * size + i) * 4; d[k] = d[k + 1] = d[k + 2] = clamp(v, 0, 255); d[k + 3] = 255; }
+  function get(i, j) { i = ((Math.floor(i) % size) + size) % size; j = ((Math.floor(j) % size) + size) % size; return d[(j * size + i) * 4]; }
+  var base = { grass: [195, 60], asphalt: [215, 40], siding: [235, 18], metal: [228, 22], crate: [215, 30], bark: [190, 45],
+    leaves: [195, 55], rock: [205, 40], wood: [212, 30], cloth: [232, 16], paint: [242, 10] }[kind];
+  for (j = 0; j < size; j++) for (i = 0; i < size; i++) put(i, j, base[0] - base[1] / 2 + rnd() * base[1]);
+  if (kind === 'siding' || kind === 'wood') {
+    var step = Math.round(size / (kind === 'siding' ? 6 : 4));
+    for (j = 0; j < size; j++) if (j % step < Math.max(1, f)) for (i = 0; i < size; i++) put(i, j, get(i, j) - 65);
+  }
+  if (kind === 'wood' || kind === 'bark') {
+    for (n = 0; n < size * 0.7; n++) { var sx = rnd() * size, sy = rnd() * size, len = rr(0.2, 0.6) * size;
+      for (i = 0; i < len; i++) { if (kind === 'bark') put(sx, sy + i, get(sx, sy + i) - 35); else put(sx + i, sy, get(sx + i, sy) - 25); } }
+  }
+  if (kind === 'grass') for (n = 0; n < size * size * 0.09; n++) { var gx = rnd() * size, gy = rnd() * size; put(gx, gy, 255); put(gx, gy + 1, 235); }
+  if (kind === 'leaves' || kind === 'rock') {
+    for (n = 0; n < 14; n++) { var cx = rnd() * size, cy = rnd() * size, cr = rr(2, 5) * f, dv = rr(-45, 30);
+      for (j = -cr; j <= cr; j++) for (i = -cr; i <= cr; i++) if (i * i + j * j <= cr * cr) put(cx + i, cy + j, get(cx + i, cy + j) + dv); }
+  }
+  x.putImageData(img, 0, 0);
+  var t = new T.CanvasTexture(c);
+  t.wrapS = t.wrapT = T.RepeatWrapping;
+  rep = rep || [1, 1]; t.repeat.set(rep[0], rep[1]);
+  if (nearest) { t.magFilter = T.NearestFilter; t.minFilter = T.NearestFilter; t.generateMipmaps = false; }
+  else t.anisotropy = 4;
+  return t;
+}
+
+/* ============================================================
+   THE WORLD MATHS
+   Everything here repeats every W metres in x and z, so the forest
+   tiles perfectly. That's the trick behind "endless": it's one tile,
+   and we always draw the copy of each thing that's nearest to you.
+   ============================================================ */
+var W = CONFIG.world.tile, TAU = Math.PI * 2, K = TAU / W;
+var P = CONFIG.path, F = CONFIG.forest;
+
+// shortest signed distance on a looping world (e.g. 79m apart is really 1m apart)
+function wrapD(d) { return d - W * Math.round(d / W); }
+
+// The path runs roughly along z, wiggling in x. Sine waves with a WHOLE number of
+// wiggles per tile, so the end of the tile lines up exactly with the start.
+function pathX(z) { var a = P.wander; return 40 + a[0] * Math.sin(K * z + 0.4) + a[1] * Math.sin(2 * K * z + 2.1) + a[2] * Math.sin(3 * K * z + 4.4); }
+function pathSlope(z) { var a = P.wander; return K * (a[0] * Math.cos(K * z + 0.4) + 2 * a[1] * Math.cos(2 * K * z + 2.1) + 3 * a[2] * Math.cos(3 * K * z + 4.4)); }
+var _pa = { d: 0, w: 0, vis: 1, mask: 0 };
+function pathAt(x, z) {
+  var s = pathSlope(z);
+  _pa.d = Math.abs(wrapD(x - pathX(z))) / Math.sqrt(1 + s * s);   // ~distance to the path centreline
+  _pa.w = P.width + P.widthVar * Math.sin(5 * K * z + 1.3);
+  var f = 0.6 * Math.sin(2 * K * z + 0.7) + 0.4 * Math.sin(5 * K * z + 2.0);
+  _pa.vis = 1 - P.fade * smoothstep(0.3, 0.75, f);               // 1 = obvious path, low = overgrown, easy to lose
+  _pa.mask = 1 - smoothstep(_pa.w * 0.55, _pa.w, _pa.d);           // 1 on the path, 0 off it
+  return _pa;
+}
+
+// Rolling hills: same idea, whole-number waves per tile. Path is worn down slightly.
+var HILLS = [[1, 0, 1.1, 0.3], [0, 1, 0.9, 1.7], [1, 1, 0.6, 4.1], [2, -1, 0.35, 2.2], [3, 2, 0.18, 0.9], [-4, 5, 0.09, 5.0], [7, 3, 0.05, 1.3]];
+function groundH(x, z) {
+  var h = 0;
+  for (var i = 0; i < HILLS.length; i++) { var w = HILLS[i]; h += w[2] * Math.sin(K * (w[0] * x + w[1] * z) + w[3]); }
+  return h - 0.1 * pathAt(x, z).mask;
+}
+function groundNormal(x, z, out) {
+  var e = 0.25;
+  return out.set(groundH(x - e, z) - groundH(x + e, z), 2 * e, groundH(x, z - e) - groundH(x, z + e)).normalize();
+}
+// slow blotchy "how thick is the forest here" value, 0..1
+function density(x, z) { return 0.5 + 0.25 * Math.sin(K * (2 * x + z) + 1.0) + 0.25 * Math.sin(K * (-x + 3 * z) + 2.5); }
+function density2(x, z) { return 0.5 + 0.3 * Math.sin(K * (4 * x - 2 * z) + 0.2) + 0.2 * Math.sin(K * (3 * x + 5 * z) + 3.1); }
+
+/* ============================================================
+   RENDERER, SCENE, LIGHTS
+   ============================================================ */
+var canvas = document.getElementById('c');
+var renderer = new T.WebGLRenderer({ canvas: canvas, antialias: CONFIG.look.antialias });
+renderer.xr.enabled = true;            // no shadowMap at all: real-time shadows are too expensive on the Go
+var ink = new T.Color(CONFIG.look.ink);
+var bgColor = new T.Color('#000000');   // the style sets this (ink in 1-bit, near-black navy in PS1/PS2)
+
+var scene = new T.Scene();
+scene.background = bgColor;
+// Night fog: things dissolve into the style's fog colour (black in 1-bit, which the shader turns into ink)
+scene.fog = new T.Fog('#000000', CONFIG.look.fogNear, CONFIG.look.fogFar);
+
+var cam = new T.PerspectiveCamera(CONFIG.look.desktopFov, 1, 0.05, 60);
+cam.rotation.order = 'YXZ';
+var dolly = new T.Group(); dolly.add(cam); scene.add(dolly);
+
+// moonlight: dim, from above. Mostly you'll only notice it on the pale path near your feet.
+var M = CONFIG.moon;
+var hemi = new T.HemisphereLight('#9aa4b8', '#000000', 0.06); scene.add(hemi);
+var moon = new T.DirectionalLight('#c8d4ff', 0.25);
+moon.position.set(M.dir[0], M.dir[1], M.dir[2]).multiplyScalar(30); scene.add(moon);
+
+// the flashlight: a SpotLight glued to your head. decay 1 = fades in a straight line to 0 at `range`.
+var FL = CONFIG.flashlight;
+var flash = new T.SpotLight('#ffffff', 1.8, FL.range, FL.angle, FL.penumbra, 1);
+flash.position.set(FL.offset[0], FL.offset[1], FL.offset[2]);
+flash.target.position.set(0, -0.8, -6);   // aims where you look, tipped down a touch
+cam.add(flash); cam.add(flash.target);
+
+// ---------- sky dome (STYLE LAB shader, night colours: faint glow straight up, black everywhere else)
+// One tweak: the gradient curve (uCurve) is per style. In 1-bit the sky has no contrast curve (the mesh
+// shader does), so with STYLE LAB's 0.6 you'd see sky dots through the trees right down to the horizon.
+var skyMat = new T.ShaderMaterial({
+  uniforms: { top: { value: new T.Color() }, hor: { value: new T.Color() }, bot: { value: new T.Color() }, uMode: { value: 2 }, uCurve: { value: 0.6 },
+    uLevels: U.uLevels, uInk: U.uInk, uPaper: U.uPaper },
+  vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: 'uniform vec3 top; uniform vec3 hor; uniform vec3 bot; uniform float uMode; uniform float uCurve; uniform float uLevels; uniform vec3 uInk; uniform vec3 uPaper;\n' + BAYER +
+    'varying vec3 vP;\nvoid main(){ float h = normalize(vP).y; vec3 c = h > 0.0 ? mix(hor, top, pow(h, uCurve)) : mix(hor, bot, pow(-h, 0.5));\n' +
+    ' if (uMode > 1.5) { float l = dot(c, vec3(0.299,0.587,0.114)); c = mix(uInk, uPaper, step(bay8(gl_FragCoord.xy) + 0.001, l)); }\n' +
+    ' else if (uMode > 0.5) { c = floor(c * uLevels + bay4(gl_FragCoord.xy)) / uLevels; }\n' +
+    ' gl_FragColor = vec4(c, 1.0); }',
+  side: T.BackSide, depthWrite: false
+});
+var sky = new T.Mesh(new T.SphereGeometry(50, 24, 12), skyMat);
+// drawn LAST (not first like STYLE LAB): depth test then skips every pixel a tree already covers. Free fill-rate.
+sky.frustumCulled = false; sky.renderOrder = 10; scene.add(sky);
+
+// ---------- blob shadows (STYLE LAB shader, locked to the dithered/screen-door mode)
+var blobMat = new T.ShaderMaterial({
+  uniforms: { color: { value: new T.Color('#000000') }, opacity: { value: 0.55 }, uMode: { value: 2 }, uInk: U.uInk },
+  // (blob shadow modes: 0 = soft see-through blend, 1 = screen-door dots in black, 2 = screen-door dots in ink)
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; vec4 p = vec4(position, 1.0);\n#ifdef USE_INSTANCING\n p = instanceMatrix * p;\n#endif\n gl_Position = projectionMatrix * modelViewMatrix * p; }',
+  fragmentShader: 'uniform vec3 color; uniform float opacity; uniform float uMode; uniform vec3 uInk;\n' + BAYER +
+    'varying vec2 vUv;\nvoid main(){ float r = length(vUv - 0.5) * 2.0; float a = (1.0 - smoothstep(0.3, 1.0, r)) * opacity;\n' +
+    ' if (uMode > 0.5) { if (a < bay4(gl_FragCoord.xy) * 0.9 + 0.05) discard; gl_FragColor = vec4(uMode > 1.5 ? uInk : color, 1.0); }\n' +
+    ' else gl_FragColor = vec4(color, a); }',
+  transparent: false, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8
+});
+
+/* ============================================================
+   MATERIALS - built per style, the STYLE LAB way: one material per "role",
+   made from the style's palette + texture size + shader hacks.
+   Colour = "how much light this bounces". Night = dim lights, not black paint.
+   ============================================================ */
+function grey(g) { return new T.Color(g, g, g); }
+var TEXKIND = { trunk: 'bark', stub: 'bark', stump: 'wood', log: 'wood', stick: 'wood', rock: 'rock', bush: 'leaves', fern: 'leaves', ground: 'grass' };
+var TEXREP = { trunk: [1, 10], stub: [1, 2], stump: [2, 1], log: [3, 1], stick: [1, 1], rock: [1, 1], bush: [2, 2], fern: [1, 2], ground: [1, 1] };
+function makeMat(st, role) {
+  var po = st.patch;
+  if (role === 'canopy') {   // pure dark silhouette way up top, never lit
+    var cm = new T.MeshBasicMaterial({ color: new T.Color(st.pal.canopy), fog: false });
+    return po.snap ? patch(cm, { snap: true }) : cm;
+  }
+  var tex = (st.tex && TEXKIND[role]) ? detailTex(TEXKIND[role], st.tex.size, st.tex.nearest, TEXREP[role]) : null;
+  var p = { color: new T.Color(role === 'trunk' || role === 'ground' ? '#ffffff' : st.pal[role]) }; // trunk colour comes per-tree, ground per-vertex
+  if (tex) p.map = tex;
+  if (role === 'ground') p.vertexColors = true;
+  if (role === 'rock') p.flatShading = true;
+  if (role === 'fern') p.side = T.DoubleSide;
+  return patch(new T.MeshLambertMaterial(p), {
+    snap: !!po.snap, affine: !!po.affine && !!tex, dither: po.dither || 0, radialFog: true, sway: role === 'fern' ? F.fernSway : 0
+  });
+}
+
+/* ============================================================
+   GEOMETRY (built once, reused by every instance)
+   ============================================================ */
+function hash3(x, y, z) {
+  x = Math.round(x * 1000) / 1000; y = Math.round(y * 1000) / 1000; z = Math.round(z * 1000) / 1000;
+  var s = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453; return s - Math.floor(s);
+}
+// lumpy-ify a shape. Hashing the position means vertices in the same spot move the same way (no cracks).
+function lumpy(g, amt) {
+  var p = g.attributes.position;
+  for (var i = 0; i < p.count; i++) {
+    var x = p.getX(i), y = p.getY(i), z = p.getZ(i), s = 1 + amt * (hash3(x, y, z) - 0.5);
+    p.setXYZ(i, x * s, y * s, z * s);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+// trunk: open-ended tapered cylinder, 1 unit tall, base at y=0. Each tree stretches it to its height.
+var geoTrunk = new T.CylinderGeometry(0.1, 0.22, 1, 7, 1, true).translate(0, 0.5, 0);
+var geoStub = new T.ConeGeometry(0.04, 1, 4, 1).translate(0, 0.5, 0);
+var geoCanopy = new T.ConeGeometry(1, 1, 7, 1).translate(0, 0.5, 0);
+var geoStump = (function () {
+  var g = new T.CylinderGeometry(0.3, 0.36, 0.6, 8, 1).translate(0, 0.3, 0), p = g.attributes.position;
+  for (var i = 0; i < p.count; i++) if (p.getY(i) > 0.59 && (Math.abs(p.getX(i)) > 0.01 || Math.abs(p.getZ(i)) > 0.01))
+    p.setY(i, 0.6 + 0.22 * (hash3(p.getX(i), 0, p.getZ(i)) - 0.5));   // jagged snapped-off top
+  g.computeVertexNormals(); return g;
+})();
+var geoRock = lumpy(new T.IcosahedronGeometry(0.5, 0), 0.55);
+var geoBush = lumpy(new T.IcosahedronGeometry(0.6, 1), 0.5);
+var geoLog = new T.CylinderGeometry(0.24, 0.28, 4, 8, 1).rotateZ(Math.PI / 2);
+var geoStick = new T.BoxGeometry(1, 0.025, 0.025);
+var geoBlob = new T.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+// fern: 7 arching fronds, each a tapering strip that rises then droops
+var geoFern = (function () {
+  var pos = [], uv = [], idx = [], fronds = 7, segs = 5;
+  for (var f = 0; f < fronds; f++) {
+    var a = f / fronds * TAU + (hash3(f, 1, 2) - 0.5) * 0.6, len = 0.5 + 0.3 * hash3(f, 3, 4);
+    var ca = Math.cos(a), sa = Math.sin(a), b = pos.length / 3;
+    for (var s = 0; s <= segs; s++) {
+      var t = s / segs, along = t * len, y = 0.04 + t * 0.75 * len - t * t * 0.7 * len, w = 0.1 * (1 - t) * (0.4 + t);
+      pos.push(ca * along + sa * w, y - w * 0.3, sa * along - ca * w, ca * along - sa * w, y - w * 0.3, sa * along + ca * w);
+      uv.push(0, t, 1, t);
+      if (s < segs) { var v = b + s * 2; idx.push(v, v + 1, v + 2, v + 1, v + 3, v + 2); }
+    }
+  }
+  var g = new T.BufferGeometry();
+  g.setAttribute('position', new T.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new T.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx); g.computeVertexNormals();
+  return g;
+})();
+
+/* ============================================================
+   INSTANCE SETS
+   Every kind of thing (trunks, rocks, ferns...) is ONE InstancedMesh = one draw call.
+   We store each instance's matrix for the master tile ("base"), and every time you
+   walk a metre we copy out only the ones near you, shifted to the nearest copy of the tile.
+   ============================================================ */
+var sets = [];
+function newBuild(withColor) { return { m: [], ax: [], az: [], c: withColor ? [] : null }; }
+var _m4 = new T.Matrix4(), _q = new T.Quaternion(), _q2 = new T.Quaternion(), _q3 = new T.Quaternion();
+var _v = new T.Vector3(), _v2 = new T.Vector3(), _v3 = new T.Vector3(), _s = new T.Vector3(), _n = new T.Vector3();
+var UP = new T.Vector3(0, 1, 0), ZAX = new T.Vector3(0, 0, 1);
+// kind/vary: for trunks, which tree type it is (0 pine, 1 birch, 2 snag) + a random 0..1 shade wobble
+function pushInst(b, ax, az, kind, vary) {
+  var e = _m4.elements; for (var k = 0; k < 16; k++) b.m.push(e[k]);
+  b.ax.push(ax); b.az.push(az); if (b.c) b.c.push(kind, vary);
+}
+var SETS = {};   // by role, so applyStyle() can hand each one its material
+function finishSet(b, geo, role, radius, outline, order) {
+  var n = b.ax.length;
+  var mesh = new T.InstancedMesh(geo, role === 'blob' ? blobMat : undefined, Math.max(1, n));
+  mesh.frustumCulled = false; mesh.renderOrder = order || 0;
+  mesh.instanceMatrix.setUsage(T.DynamicDrawUsage);
+  var S = { mesh: mesh, role: role, n: n, base: new Float32Array(b.m), ax: new Float32Array(b.ax), az: new Float32Array(b.az),
+    raw: b.c ? new Float32Array(b.c) : null, col: b.c ? new Float32Array(n * 3) : null, radius: radius, hull: null };
+  if (S.col) { mesh.setColorAt(0, grey(1)); mesh.instanceColor.setUsage(T.DynamicDrawUsage); }
+  SETS[role] = S;
+  if (outline) {      // same as STYLE LAB attachHull(): a second InstancedMesh sharing the matrices
+    addHullNormals(geo);
+    var h = new T.InstancedMesh(geo, hullMat, Math.max(1, n));
+    h.instanceMatrix = mesh.instanceMatrix; h.frustumCulled = false;
+    mesh.add(h); S.hull = h;
+  }
+  scene.add(mesh); sets.push(S);
+  return S;
+}
+function packSet(S, px, pz) {
+  var R2 = S.radius * S.radius, arr = S.mesh.instanceMatrix.array, base = S.base, carr = S.col ? S.mesh.instanceColor.array : null;
+  var n = 0;
+  for (var i = 0; i < S.n; i++) {
+    var dx = S.ax[i] - px, dz = S.az[i] - pz, ox = -W * Math.round(dx / W), oz = -W * Math.round(dz / W);
+    dx += ox; dz += oz;
+    if (dx * dx + dz * dz > R2) continue;
+    var o = n * 16, k = i * 16;
+    for (var e = 0; e < 16; e++) arr[o + e] = base[k + e];
+    arr[o + 12] += ox; arr[o + 14] += oz;
+    if (carr) { carr[n * 3] = S.col[i * 3]; carr[n * 3 + 1] = S.col[i * 3 + 1]; carr[n * 3 + 2] = S.col[i * 3 + 2]; }
+    n++;
+  }
+  S.mesh.count = n;
+  var im = S.mesh.instanceMatrix; im.updateRange.offset = 0; im.updateRange.count = Math.max(16, n * 16); im.needsUpdate = true;
+  if (carr) { var ic = S.mesh.instanceColor; ic.updateRange.offset = 0; ic.updateRange.count = Math.max(3, n * 3); ic.needsUpdate = true; }
+  if (S.hull) S.hull.count = n;
+}
+
+// ---------- collision: a grid of cells over the tile, each listing the trunks/rocks in it
+var CC = 4, CN = Math.round(W / CC), cells = [], colX = [], colZ = [], colR = [];
+for (var ci0 = 0; ci0 < CN * CN; ci0++) cells.push([]);
+function addCollider(x, z, r) {
+  var id = colX.length; colX.push(x); colZ.push(z); colR.push(r);
+  cells[mod(Math.floor(z / CC), CN) * CN + mod(Math.floor(x / CC), CN)].push(id);
+}
+
+/* ============================================================
+   GROW THE FOREST (all positions inside the master tile, 0..W)
+   ============================================================ */
+var B = { trunk: newBuild(true), stub: newBuild(), canopy: newBuild(), stump: newBuild(), rock: newBuild(),
+  bush: newBuild(), fern: newBuild(), log: newBuild(), stick: newBuild(), blob: newBuild() };
+
+function addBlob(x, z, sx, sz, yaw) {
+  groundNormal(x, z, _n); _q.setFromUnitVectors(UP, _n); _q2.setFromAxisAngle(UP, yaw || 0); _q.multiply(_q2);
+  _v.set(x, groundH(x, z) + 0.03, z); _s.set(sx, 1, sz);
+  _m4.compose(_v, _q, _s); pushInst(B.blob, x, z);
+}
+function randXZ() { _v3.set(rnd() * W, 0, rnd() * W); return _v3; }
+
+var qLean = new T.Quaternion(), trunkUp = new T.Vector3(), tBase = new T.Vector3(), tDir = new T.Vector3();
+function addTree(x, z) {
+  var r = rnd(), type = r < F.dead ? 2 : (r < F.dead + F.birch ? 1 : 0), h, rs;
+  if (type === 0) { h = rr(18, 28); rs = rr(0.8, 1.35); }       // pine: tall, dark
+  else if (type === 1) { h = rr(11, 19); rs = rr(0.55, 0.85); } // birch: thin, pale
+  else { h = rr(2.5, 10); rs = rr(0.9, 1.4); }                 // dead snag: snapped off
+  var lean = rnd() < F.leanChance ? rr(0.1, 0.3) : rr(0, 0.045), la = rr(0, TAU);
+  _v2.set(Math.cos(la), 0, Math.sin(la)); qLean.setFromAxisAngle(_v2, lean);
+  tBase.set(x, groundH(x, z) - 0.4, z);                   // sunk 40cm so slopes never show a floating base
+  _s.set(rs, h + 0.4, rs);
+  _m4.compose(tBase, qLean, _s); pushInst(B.trunk, x, z, type, rnd());
+  addCollider(x, z, 0.21 * rs);
+  addBlob(x, z, 1.1 * rs + 0.4, 1.1 * rs + 0.4, 0);
+  trunkUp.set(0, 1, 0).applyQuaternion(qLean);
+  // dead branch stubs low on pines (and a couple on birches). Snags stay bare.
+  var ns = !F.branchStubs ? 0 : (type === 0 ? Math.floor(rr(3, 8)) : (type === 1 ? Math.floor(rr(0, 3)) : 0));
+  for (var s = 0; s < ns; s++) {
+    var hh = rr(1.5, Math.min(10, h * 0.5)), a = rr(0, TAU), droop = rr(0.05, 0.5), len = rr(0.35, 1.3) * (1.15 - hh / 14);
+    var trR = (0.22 - 0.12 * (hh + 0.4) / (h + 0.4)) * rs;
+    tDir.set(Math.cos(a), 0, -Math.sin(a)).applyQuaternion(qLean);
+    _v.copy(tBase).addScaledVector(trunkUp, hh + 0.4).addScaledVector(tDir, trR * 0.8);
+    _q2.setFromAxisAngle(UP, a); _q3.setFromAxisAngle(ZAX, -(Math.PI / 2 + droop));
+    _q.copy(qLean).multiply(_q2).multiply(_q3);
+    _s.set(1, len, 1); _m4.compose(_v, _q, _s); pushInst(B.stub, x, z);
+  }
+  // canopy way up in the dark: you only ever see it as black shapes against the faint sky
+  if (F.canopy && type !== 2) {
+    var layers = type === 0 ? [[0.56, 2.3, 5.5], [0.69, 1.8, 5], [0.82, 1.2, 4.5]] : [[0.58, 2.2, 4], [0.76, 1.6, 3.5]];
+    for (var l = 0; l < layers.length; l++) {
+      var L = layers[l], rad = L[1] * rr(0.8, 1.2);
+      _v.copy(tBase).addScaledVector(trunkUp, h * L[0] + 0.4);
+      _q2.setFromAxisAngle(UP, rr(0, TAU)); _q.copy(qLean).multiply(_q2);
+      _s.set(rad, L[2] * rr(0.85, 1.15), rad); _m4.compose(_v, _q, _s); pushInst(B.canopy, x, z);
+    }
+  }
+}
+
+seed = F.seed * 7919 + 1;
+(function growTrees() {
+  var TC = Math.round(W / F.treeCell), cs = W / TC;
+  for (var cj = 0; cj < TC; cj++) for (var ci = 0; ci < TC; ci++) {
+    var d = density((ci + 0.5) * cs, (cj + 0.5) * cs);
+    var tries = rnd() < F.treeChance * (0.55 + 0.45 * d) ? 1 : 0;
+    if (d > 0.7 && rnd() < F.clusterChance) tries++;
+    for (var t = 0; t < tries; t++) {
+      var x = (ci + rr(0.05, 0.95)) * cs, z = (cj + rr(0.05, 0.95)) * cs, pa = pathAt(x, z);
+      // keep the path clear... except where it's fading out, there the trees close in
+      if (pa.d < pa.w + P.clearance * (0.35 + 0.65 * pa.vis)) continue;
+      addTree(x, z);
+    }
+  }
+})();
+
+(function growProps() {
+  var i, p, pa, x, z, sc, gy;
+  for (i = 0; i < F.stumps; i++) {
+    p = randXZ(); x = p.x; z = p.z; pa = pathAt(x, z); if (pa.d < pa.w + 0.4) { i--; continue; }
+    sc = rr(0.7, 1.3); _q.setFromAxisAngle(UP, rr(0, TAU)); _v.set(x, groundH(x, z) - 0.12, z); _s.set(sc, rr(0.6, 1.4), sc);
+    _m4.compose(_v, _q, _s); pushInst(B.stump, x, z); addCollider(x, z, 0.32 * sc); addBlob(x, z, 1.2 * sc, 1.2 * sc, 0);
+  }
+  for (i = 0; i < F.rocks; i++) {
+    p = randXZ(); x = p.x; z = p.z; pa = pathAt(x, z); if (pa.d < pa.w * 0.7) { i--; continue; }
+    sc = rnd() < 0.15 ? rr(1.5, 2.4) : rr(0.35, 1.3);                   // mostly rocks, a few boulders
+    _q.setFromAxisAngle(UP, rr(0, TAU)); _v.set(x, groundH(x, z) - sc * 0.12, z); _s.set(sc, sc * rr(0.5, 0.8), sc * rr(0.8, 1.2));
+    _m4.compose(_v, _q, _s); pushInst(B.rock, x, z); if (sc > 0.9) addCollider(x, z, 0.42 * sc); addBlob(x, z, 1.15 * sc, 1.15 * sc, 0);
+  }
+  for (i = 0; i < F.bushes; i++) {
+    p = randXZ(); x = p.x; z = p.z; pa = pathAt(x, z);
+    if (pa.d < pa.w + 0.3 || rnd() > 0.35 + 0.65 * density(x, z)) { i--; continue; }
+    sc = rr(0.6, 1.4); _q.setFromAxisAngle(UP, rr(0, TAU)); _v.set(x, groundH(x, z) - 0.1, z); _s.set(sc, sc * rr(0.55, 0.85), sc);
+    _m4.compose(_v, _q, _s); pushInst(B.bush, x, z); addBlob(x, z, 1.3 * sc, 1.3 * sc, 0);
+  }
+  for (i = 0; i < F.ferns; i++) {
+    p = randXZ(); x = p.x; z = p.z; pa = pathAt(x, z);
+    if (rnd() > density2(x, z)) { i--; continue; }
+    if (pa.d < pa.w * 0.8 && (pa.vis > 0.55 || rnd() < 0.5)) { i--; continue; }  // ferns creep over the faded bits
+    sc = rr(0.7, 1.5); _q.setFromAxisAngle(UP, rr(0, TAU)); _v.set(x, groundH(x, z) - 0.02, z); _s.set(sc, sc, sc);
+    _m4.compose(_v, _q, _s); pushInst(B.fern, x, z);
+  }
+  function addLog(x, z, yaw) {
+    var ls = rr(0.7, 1.4), r = rr(0.8, 1.2), L = 4 * ls, dx = Math.cos(yaw) * L / 2, dz = -Math.sin(yaw) * L / 2;
+    var h1 = groundH(x - dx, z - dz), h2 = groundH(x + dx, z + dz);
+    _q.setFromEuler(new T.Euler(0, yaw, Math.atan2(h2 - h1, L), 'YZX'));   // follow the slope
+    _v.set(x, (h1 + h2) / 2 + 0.18 * r, z); _s.set(ls, r, r);
+    _m4.compose(_v, _q, _s); pushInst(B.log, x, z); addBlob(x, z, L * 0.95, 0.9 * r, yaw);
+  }
+  for (i = 0; i < F.logs; i++) { p = randXZ(); pa = pathAt(p.x, p.z); if (pa.d < pa.w + 2) { i--; continue; } addLog(p.x, p.z, rr(0, TAU)); }
+  // a few logs right across the path, so you have to look down and find it again on the other side
+  for (i = 0; i < 3; i++) { z = (i + rr(0.2, 0.8)) * W / 3; addLog(pathX(z), z, Math.atan2(pathSlope(z), 1) + rr(-0.35, 0.35)); }
+  for (i = 0; i < F.sticks; i++) {
+    p = randXZ(); x = p.x; z = p.z; gy = groundH(x, z);
+    _q.setFromEuler(new T.Euler(rr(-0.1, 0.1), rr(0, TAU), rr(-0.06, 0.06), 'YXZ'));
+    _v.set(x, gy + 0.012, z); _s.set(rr(0.25, 1.1), 1, 1); _m4.compose(_v, _q, _s); pushInst(B.stick, x, z);
+  }
+})();
+
+var R = CONFIG.world.drawRadius, RS = CONFIG.world.smallRadius;
+finishSet(B.trunk, geoTrunk, 'trunk', R, true, 0);
+if (F.branchStubs) finishSet(B.stub, geoStub, 'stub', R, false, 1);
+if (F.canopy) finishSet(B.canopy, geoCanopy, 'canopy', R, false, 1);
+finishSet(B.stump, geoStump, 'stump', R, true, 1);
+finishSet(B.rock, geoRock, 'rock', R, true, 1);
+finishSet(B.bush, geoBush, 'bush', R, true, 1);
+finishSet(B.log, geoLog, 'log', R, true, 1);
+finishSet(B.fern, geoFern, 'fern', RS, false, 2);
+finishSet(B.stick, geoStick, 'stick', RS, false, 2);
+finishSet(B.blob, geoBlob, 'blob', R, false, 6);
+
+// per-tree colour = the style's pine/birch/snag colour, nudged lighter/darker so no two match
+function recolorTrunks(st) {
+  var S = SETS.trunk, types = [new T.Color(st.pal.pine), new T.Color(st.pal.birch), new T.Color(st.pal.snag)];
+  for (var i = 0; i < S.n; i++) {
+    var c = types[S.raw[i * 2]], m = 0.85 + 0.3 * S.raw[i * 2 + 1];
+    S.col[i * 3] = c.r * m; S.col[i * 3 + 1] = c.g * m; S.col[i * 3 + 2] = c.b * m;
+  }
+}
+
+/* ============================================================
+   THE GROUND
+   We pre-bake height + colour + normal for the whole tile on a 0.5m grid (once),
+   then the ground mesh is a 44x44m sheet that follows you and just looks up the bake.
+   ============================================================ */
+var GS = CONFIG.world.groundStep, GN = Math.round(W / GS);
+// gMot = mottling multiplier (patchy leaf litter), gPath = how much "path" this spot is (0..1)
+var gH = new Float32Array(GN * GN), gMot = new Float32Array(GN * GN), gPath = new Float32Array(GN * GN), gNrm = new Float32Array(GN * GN * 3);
+(function bakeGround() {
+  seed = F.seed * 31 + 5;
+  var i, j, t;
+  for (j = 0; j < GN; j++) for (i = 0; i < GN; i++) {
+    var x = i * GS, z = j * GS, pa;
+    t = j * GN + i; gH[t] = groundH(x, z); pa = pathAt(x, z);
+    gMot[t] = 1 + 0.15 * Math.sin(K * (6 * x + 4 * z)) + (rnd() - 0.5) * 0.3 * (1 - 0.6 * pa.mask);
+    gPath[t] = pa.mask * pa.vis;
+  }
+  for (j = 0; j < GN; j++) for (i = 0; i < GN; i++) {
+    t = j * GN + i;
+    _n.set(gH[j * GN + mod(i - 1, GN)] - gH[j * GN + mod(i + 1, GN)], 2 * GS, gH[mod(j - 1, GN) * GN + i] - gH[mod(j + 1, GN) * GN + i]).normalize();
+    gNrm[t * 3] = _n.x; gNrm[t * 3 + 1] = _n.y; gNrm[t * 3 + 2] = _n.z;
+  }
+})();
+var GM = Math.round(2 * R / GS), GV = GM + 1;
+var groundGeo = new T.BufferGeometry();
+var gPosA = new T.BufferAttribute(new Float32Array(GV * GV * 3), 3), gNorA = new T.BufferAttribute(new Float32Array(GV * GV * 3), 3), gColA = new T.BufferAttribute(new Float32Array(GV * GV * 3), 3);
+var gUvA = new T.BufferAttribute(new Float32Array(GV * GV * 2), 2);
+gPosA.setUsage(T.DynamicDrawUsage); gNorA.setUsage(T.DynamicDrawUsage); gColA.setUsage(T.DynamicDrawUsage); gUvA.setUsage(T.DynamicDrawUsage);
+groundGeo.setAttribute('position', gPosA); groundGeo.setAttribute('normal', gNorA); groundGeo.setAttribute('color', gColA); groundGeo.setAttribute('uv', gUvA);
+var litterCol = new T.Color(), pathCol = new T.Color();   // set by the style
+(function () {
+  var idx = [];
+  for (var j = 0; j < GM; j++) for (var i = 0; i < GM; i++) { var v = j * GV + i; idx.push(v, v + GV, v + 1, v + 1, v + GV, v + GV + 1); }
+  groundGeo.setIndex(idx);
+})();
+var ground = new T.Mesh(groundGeo);
+ground.frustumCulled = false; ground.renderOrder = 5;   // after the trees, so hidden ground pixels get skipped
+scene.add(ground);
+var groundCX = 1e9, groundCZ = 1e9;
+function rebuildGround(px, pz) {
+  var snap = CONFIG.world.groundSnap, cx = Math.round(px / snap) * snap, cz = Math.round(pz / snap) * snap;
+  if (cx === groundCX && cz === groundCZ) return;
+  groundCX = cx; groundCZ = cz;
+  var x0 = cx - R, z0 = cz - R, i0 = Math.round(x0 / GS), j0 = Math.round(z0 / GS);
+  var pa = gPosA.array, na = gNorA.array, ca = gColA.array, ua = gUvA.array;
+  // UVs: one texture repeat every 2m. Subtracting a whole number keeps them small (precision) without a seam.
+  var u0 = Math.floor(x0 * 0.5), w0 = Math.floor(z0 * 0.5);
+  var lr = litterCol.r, lg = litterCol.g, lb = litterCol.b, pr = pathCol.r, pg = pathCol.g, pb = pathCol.b;
+  for (var j = 0; j < GV; j++) {
+    var tj = mod(j0 + j, GN) * GN;
+    for (var i = 0; i < GV; i++) {
+      var t = tj + mod(i0 + i, GN), v = (j * GV + i) * 3, m = gMot[t], p = gPath[t];
+      pa[v] = x0 + i * GS; pa[v + 1] = gH[t]; pa[v + 2] = z0 + j * GS;
+      na[v] = gNrm[t * 3]; na[v + 1] = gNrm[t * 3 + 1]; na[v + 2] = gNrm[t * 3 + 2];
+      ca[v] = lr * m + (pr - lr * m) * p; ca[v + 1] = lg * m + (pg - lg * m) * p; ca[v + 2] = lb * m + (pb - lb * m) * p;
+      ua[(j * GV + i) * 2] = (x0 + i * GS) * 0.5 - u0; ua[(j * GV + i) * 2 + 1] = (z0 + j * GS) * 0.5 - w0;
+    }
+  }
+  gPosA.needsUpdate = true; gNorA.needsUpdate = true; gColA.needsUpdate = true; gUvA.needsUpdate = true;
+}
+
+/* ============================================================
+   PLAYER + WALKING
+   ============================================================ */
+var Wk = CONFIG.walk;
+var player = { x: pathX(0), z: 0, y: 0, yaw: Math.atan2(pathSlope(0), 1), pitch: 0,
+  dx: 0, dz: -1, speed: 0, stepDist: 0, walkTime: 0, tileX: 0, tileZ: 0 };
+player.y = groundH(player.x, player.z);
+var keys = {}, started = false, selectHeld = false;
+
+function collide() {
+  var cx = Math.floor(player.x / CC), cz = Math.floor(player.z / CC);
+  for (var dz = -1; dz <= 1; dz++) for (var dx = -1; dx <= 1; dx++) {
+    var list = cells[mod(cz + dz, CN) * CN + mod(cx + dx, CN)];
+    for (var k = 0; k < list.length; k++) {
+      var id = list[k], ddx = wrapD(player.x - colX[id]), ddz = wrapD(player.z - colZ[id]), r = colR[id] + Wk.playerRadius;
+      var d2 = ddx * ddx + ddz * ddz;
+      if (d2 < r * r && d2 > 1e-8) { var d = Math.sqrt(d2), push = (r - d) / d; player.x += ddx * push; player.z += ddz * push; }
+    }
+  }
+}
+
+// fires once per stride -> footstep sound (see SOUND below)
+function onFootstep() { playFootstep(1); }
+
+var vrTap = { was: false, pressT: 0, lastTap: -9 };
+function vrHeld(now) {
+  var held = selectHeld, s = renderer.xr.getSession();
+  if (s && s.inputSources) for (var i = 0; i < s.inputSources.length; i++) {
+    var gp = s.inputSources[i] && s.inputSources[i].gamepad;
+    if (gp && gp.buttons) for (var b = 0; b < Math.min(gp.buttons.length, 4); b++) if (gp.buttons[b] && gp.buttons[b].pressed) held = true;
+  }
+  // taps: a single tap waits 0.45s to make sure it isn't the start of a double-tap
+  if (held && !vrTap.was) vrTap.pressT = now;
+  if (!held && vrTap.was && now - vrTap.pressT < 0.3) {
+    if (now - vrTap.lastTap < 0.45) { vrTap.pending = false; onDoubleTap(); vrTap.lastTap = -9; }
+    else { vrTap.lastTap = now; vrTap.pending = true; }
+  }
+  if (vrTap.pending && now - vrTap.lastTap > 0.45) { vrTap.pending = false; onSingleTap(); }
+  vrTap.was = held;
+  return held;
+}
+
+// lab controls in VR. "Looking at your feet" = camera pointing mostly straight down.
+var _look = new T.Vector3();
+function atFeet() { cam.getWorldDirection(_look); return _look.y < -0.8; }
+function onSingleTap() { if (atFeet()) labNextDist(); else labNextType(); }
+function onDoubleTap() { if (atFeet()) labNextLook(); else labTogglePose(); }
+
+function updateWalk(dt, now, vr) {
+  var want = 0, run = 1;
+  if (vr) {
+    if (vrHeld(now)) {
+      cam.getWorldDirection(_v); _v.y = 0;          // walk where your head points (flattened)
+      if (_v.lengthSq() > 1e-4) { _v.normalize(); player.dx = _v.x; player.dz = _v.z; want = 1; }
+    }
+  } else if (started) {
+    var f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
+    var s = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+    if (f || s) {
+      var sy = Math.sin(player.yaw), cy = Math.cos(player.yaw);
+      var mx = -sy * f + cy * s, mz = -cy * f - sy * s, l = Math.sqrt(mx * mx + mz * mz);
+      player.dx = mx / l; player.dz = mz / l; want = 1;
+    }
+    if (keys.ShiftLeft || keys.ShiftRight) run = Wk.desktopRunMultiplier;
+  } else {
+    player.yaw += dt * 0.03;                           // slow creepy pan behind the title screen
+  }
+  if (want && player.speed < 0.05) player.stepDist = Wk.stride * 0.6;   // first step lands quickly when you set off
+  player.speed += (want * Wk.speed * run - player.speed) * Math.min(1, dt * Wk.accel);
+  // the little scuff your feet make as you come to a stop (stage 3's follower copies this...)
+  if (!want && player.walking && player.speed < 0.35) { player.walking = false; playFootstep(0.45); }
+  if (want && player.speed > 0.5) player.walking = true;
+  if (player.speed < 0.001) player.speed = 0;
+  player.x += player.dx * player.speed * dt;
+  player.z += player.dz * player.speed * dt;
+  collide();
+  player.stepDist += player.speed * dt;
+  if (player.stepDist >= Wk.stride) { player.stepDist -= Wk.stride; onFootstep(); }
+  if (player.speed > 0.3) player.walkTime += dt;     // stage 4: the scare director feeds on this
+  player.tileX = Math.floor(player.x / W); player.tileZ = Math.floor(player.z / W);  // which copy of the loop you're in
+  var gy = groundH(player.x, player.z);
+  player.y += (gy - player.y) * Math.min(1, dt * 8);
+  dolly.position.set(player.x, player.y + (vr ? Wk.eyeHeight : 0), player.z);
+  if (!vr) {
+    var bob = Math.abs(Math.sin(player.stepDist / Wk.stride * Math.PI)) * 0.03 * Math.min(1, player.speed / Wk.speed);
+    cam.position.set(0, Wk.eyeHeight + bob, 0);
+    cam.rotation.set(player.pitch, player.yaw, 0);
+  }
+}
+
+/* ============================================================
+   FLASHLIGHT FLICKER
+   flicker(strength) is public so the stage-4 scare director can call it.
+   ============================================================ */
+var flick = { next: 20, seq: null, i: 0, t: 0 }, flashBase = 1.8;
+function flicker(strength) {
+  var seq = [], n = 2 + Math.floor(Math.random() * 2 + strength * 3);
+  for (var i = 0; i < n; i++) { seq.push([mr(0.03, 0.09), 1 - strength * mr(0.4, 1)]); seq.push([mr(0.03, 0.15), 1]); }
+  if (strength > 0.7) seq.push([mr(0.25, 0.6), 0.04], [0.06, 0.5], [0.05, 0.1], [0.1, 1]);  // the bad one: nearly dies
+  flick.seq = seq; flick.i = 0; flick.t = 0;
+}
+function updateFlashlight(now, dt) {
+  var level = 1;
+  if (flick.seq) {
+    flick.t += dt;
+    while (flick.seq && flick.t > flick.seq[flick.i][0]) { flick.t -= flick.seq[flick.i][0]; flick.i++; if (flick.i >= flick.seq.length) flick.seq = null; }
+    if (flick.seq) level = flick.seq[flick.i][1];
+  } else if (started && now > flick.next) {
+    flicker(mr(0.15, FL.flickerDepth));
+    flick.next = now + mr(FL.flickerMinGap, FL.flickerMaxGap);
+  }
+  flash.intensity = flashBase * level;
+}
+
+/* ============================================================
+   WORLD UPDATE: repack instances + re-centre the ground as you walk
+   ============================================================ */
+var packX = 1e9, packZ = 1e9;
+function worldUpdate() {
+  var dx = player.x - packX, dz = player.z - packZ, st = CONFIG.world.repackStep;
+  if (dx * dx + dz * dz > st * st) {
+    packX = player.x; packZ = player.z;
+    for (var i = 0; i < sets.length; i++) packSet(sets[i], packX, packZ);
+  }
+  rebuildGround(player.x, player.z);
+}
+
+/* ============================================================
+   DESKTOP: low-res render + nearest upscale (from STYLE LAB)
+   ============================================================ */
+// render tiny, then stretch up: nearest = sharp pixels (PS1, 1-bit), linear = soft PS2 blur
+var rtN = new T.WebGLRenderTarget(4, 4, { minFilter: T.NearestFilter, magFilter: T.NearestFilter });
+var rtL = new T.WebGLRenderTarget(4, 4, { minFilter: T.LinearFilter, magFilter: T.LinearFilter });
+var quadMat = new T.ShaderMaterial({
+  uniforms: { tDiffuse: { value: null }, uVig: { value: 0 } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: 'uniform sampler2D tDiffuse; uniform float uVig; varying vec2 vUv;\nvoid main(){ vec3 c = texture2D(tDiffuse, vUv).rgb; float d = length(vUv - 0.5); c *= 1.0 - uVig * smoothstep(0.3, 0.8, d); gl_FragColor = vec4(c, 1.0); }',
+  depthTest: false, depthWrite: false
+});
+var quadScene = new T.Scene(), quadCam = new T.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+var quad = new T.Mesh(new T.PlaneGeometry(2, 2), quadMat); quad.frustumCulled = false; quadScene.add(quad);
+
+function resize() {
+  if (renderer.xr.isPresenting) return;
+  var w = window.innerWidth, h = window.innerHeight;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(w, h, false);
+  var ph = style.pixelH, pw = Math.round(w * ph / h);
+  rtN.setSize(pw, ph); rtL.setSize(pw, ph); U.uSnapRes.value.set(pw, ph);
+  cam.aspect = w / h; cam.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+
+/* ============================================================
+   STYLES: swap every material, light, fog and sky colour at once (like STYLE LAB's applyStyle)
+   ============================================================ */
+var STYLE_ORDER = ['ps1', 'ps2'], styleKey = CONFIG.style, style = CONFIG.styles[styleKey];
+var styleFlashT = -9;   // when the style last changed (VR shows its name for a moment)
+function applyStyle(key) {
+  if (!CONFIG.styles[key]) key = 'ps1';
+  styleKey = key; style = CONFIG.styles[key];
+  var st = style, k;
+  if (!st.mats) { st.mats = {}; for (k in SETS) if (k !== 'blob') st.mats[k] = makeMat(st, k); st.mats.ground = makeMat(st, 'ground'); }
+  for (k in SETS) {
+    var S = SETS[k];
+    if (k !== 'blob') S.mesh.material = st.mats[k];
+    if (S.hull) S.hull.visible = !!st.outline;        // ink outlines are a 1-bit thing
+  }
+  ground.material = st.mats.ground;
+  recolorTrunks(st);
+  litterCol.set(st.pal.litter); pathCol.set(st.pal.path);
+  scene.fog.color.set(st.fog); bgColor.set(st.patch.dither === 2 ? CONFIG.look.ink : st.fog); renderer.setClearColor(bgColor);
+  skyMat.uniforms.top.value.set(st.sky[0]); skyMat.uniforms.hor.value.set(st.sky[1]); skyMat.uniforms.bot.value.set(st.sky[2]);
+  skyMat.uniforms.uMode.value = st.patch.dither || 0; skyMat.uniforms.uCurve.value = st.skyCurve;
+  moon.color.set(st.moon[0]); moon.intensity = st.moon[1];
+  hemi.color.set(st.hemi[0]); hemi.groundColor.set(st.hemi[1]); hemi.intensity = st.hemi[2];
+  flash.color.set(st.flash[0]); flashBase = st.flash[1];
+  U.uLevels.value = st.levels || 24;
+  var bm = st.blob[0];
+  blobMat.uniforms.uMode.value = bm; blobMat.uniforms.opacity.value = st.blob[1];
+  if (blobMat.transparent !== (bm === 0)) { blobMat.transparent = bm === 0; blobMat.needsUpdate = true; }
+  quadMat.uniforms.uVig.value = st.vignette || 0;
+  packX = 1e9; groundCX = 1e9;                         // force instances + ground to rebuild with new colours
+  styleFlashT = U.uTime.value;
+  if (renderer.xr.isPresenting) U.uSnapRes.value.set(420, 480); else resize();
+  fpsDirty = true;                                     // refresh the label right away
+}
+function nextStyle() { applyStyle(STYLE_ORDER[(STYLE_ORDER.indexOf(styleKey) + 1) % STYLE_ORDER.length]); }
+
+/* ============================================================
+   FPS COUNTER (DOM on desktop, a little floating label in VR)
+   ============================================================ */
+var showFps = CONFIG.debug.showFps, fpsEl = document.getElementById('fps');
+var hudCanvas = document.createElement('canvas'); hudCanvas.width = 512; hudCanvas.height = 48;
+var hudTex = new T.CanvasTexture(hudCanvas);
+var hud = new T.Mesh(new T.PlaneGeometry(0.48, 0.045), new T.MeshBasicMaterial({ map: hudTex, transparent: true, depthTest: false, depthWrite: false, fog: false }));
+hud.position.set(0, -0.3, -1); hud.renderOrder = 999; hud.frustumCulled = false; hud.visible = false; cam.add(hud);
+function toggleFps() { showFps = !showFps; fpsEl.style.display = showFps && !renderer.xr.isPresenting ? 'block' : 'none'; }
+function drawFps(txt) {
+  fpsEl.textContent = txt;
+  var x = hudCanvas.getContext('2d'); x.clearRect(0, 0, 512, 48);
+  x.fillStyle = 'rgba(0,0,0,0.75)'; x.fillRect(0, 0, 512, 48);
+  x.fillStyle = CONFIG.look.paper; x.font = '22px monospace'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.fillText(txt, 256, 25); hudTex.needsUpdate = true;
+}
+
+/* ============================================================
+   INPUT + START SCREEN + VR
+   ============================================================ */
+var startEl = document.getElementById('start'), lockEl = document.getElementById('lock');
+function begin() { initAudio(); started = true; document.getElementById('lab').style.display = 'block'; if (!LAB.figs.length) labSpawn(); startEl.style.display = 'none'; fpsEl.style.display = showFps ? 'block' : 'none'; }
+document.getElementById('go').onclick = function () { begin(); if (canvas.requestPointerLock) canvas.requestPointerLock(); };
+canvas.addEventListener('click', function () { if (started && !renderer.xr.isPresenting && canvas.requestPointerLock) canvas.requestPointerLock(); });
+document.addEventListener('pointerlockchange', function () { lockEl.style.display = (started && document.pointerLockElement !== canvas && !renderer.xr.isPresenting) ? 'block' : 'none'; });
+document.addEventListener('mousemove', function (e) {
+  if (document.pointerLockElement !== canvas) return;
+  player.yaw -= (e.movementX || 0) * Wk.mouseSens;
+  player.pitch = clamp(player.pitch - (e.movementY || 0) * Wk.mouseSens, -1.45, 1.45);
+});
+window.addEventListener('keydown', function (e) {
+  keys[e.code] = true;
+  if (e.code === 'KeyF') toggleFps();
+  var n = parseInt(e.key, 10);
+  if (n >= 0 && n <= 5) labSetType(n);
+  if (e.code === 'KeyZ') labNextDist();
+  if (e.code === 'KeyB') labTogglePose();
+  if (e.code === 'KeyP') { applyStyle(styleKey === 'ps1' ? 'ps2' : 'ps1'); labRefresh(); }
+  if (e.code === 'KeyV') labCycleLook();
+  if (e.code === 'KeyE') { LAB.eyes = !LAB.eyes; labRefresh(); }
+  if (e.code === 'KeyH') hush(15);
+  if (e.code === 'KeyM' && A.ctx) A.master.gain.value = A.master.gain.value > 0 ? 0 : CONFIG.sound.master;
+});
+window.addEventListener('keyup', function (e) { keys[e.code] = false; });
+window.addEventListener('blur', function () { keys = {}; });
+
+var vrBtn = document.getElementById('vr'), session = null;
+if (navigator.xr && navigator.xr.isSessionSupported) {
+  navigator.xr.isSessionSupported('immersive-vr').then(function (ok) { if (ok) vrBtn.style.display = 'inline-block'; });
+}
+vrBtn.onclick = function () {
+  if (session) { session.end(); return; }
+  initAudio();   // audio has to be started inside a click, so it happens right here
+  navigator.xr.requestSession('immersive-vr').then(function (s) {
+    session = s;
+    if (document.exitPointerLock) document.exitPointerLock();
+    renderer.xr.setReferenceSpaceType('local');
+    var pr = renderer.xr.setSession(s);
+    var fov = function () { if (renderer.xr.setFoveation) renderer.xr.setFoveation(CONFIG.look.vrFoveation); };
+    if (pr && pr.then) pr.then(fov); else fov();
+    dolly.rotation.set(0, player.yaw, 0);           // keep facing the way you were facing
+    cam.position.set(0, 0, 0); cam.rotation.set(0, 0, 0);
+    U.uSnapRes.value.set(420, 480);                  // PS1 wobble grid in VR (like STYLE LAB)
+    begin(); fpsEl.style.display = 'none';
+    s.addEventListener('selectstart', function () { selectHeld = true; });
+    s.addEventListener('selectend', function () { selectHeld = false; });
+    s.addEventListener('end', function () {
+      session = null; selectHeld = false; vrBtn.textContent = 'ENTER VR';
+      dolly.rotation.set(0, 0, 0); started = false; startEl.style.display = ''; resize();
+    });
+    vrBtn.textContent = 'EXIT VR';
+  });
+};
+
+/* ============================================================
+   SOUND  (stage 2)
+   Everything is synthesized live with Web Audio: no sound files at all.
+   Your ears (the "listener") get glued to the camera every frame, and every sound
+   goes through a PannerNode set to HRTF. HRTF filters a sound the way your head and
+   outer ear would, so it sounds ABOVE / BEHIND / BELOW you, not just louder in one ear.
+
+   Signal flow:
+     sources -> [bus: wind | drone | life | steps | sfx] -> master -> compressor -> speakers
+   A "bus" is just a volume knob a group of sounds shares. The life bus (crickets + owls)
+   is the one hush() slams shut when the forest goes silent.
+   ============================================================ */
+var SN = CONFIG.sound;
+var A = { ctx: null, on: false, hushUntil: -1, windScale: 1, droneTime: 0, tick: 0, nextOwl: 0, crickets: [], wind: [], footSide: 1 };
+
+function initAudio() {
+  if (A.ctx) { if (A.ctx.state === 'suspended') A.ctx.resume(); return; }
+  var AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  var ctx = A.ctx = new AC();
+  A.master = ctx.createGain(); A.master.gain.value = SN.master;
+  // the compressor squashes any sudden peaks so nothing ever clips/distorts
+  var comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -20; comp.knee.value = 12; comp.ratio.value = 4; comp.attack.value = 0.003; comp.release.value = 0.3;
+  A.master.connect(comp); comp.connect(ctx.destination);
+  function bus(v) { var g = ctx.createGain(); g.gain.value = v; g.connect(A.master); return g; }
+  A.windBus = bus(1); A.droneBus = bus(1); A.lifeBus = bus(1); A.stepBus = bus(SN.steps.volume); A.sfxBus = bus(1);
+  A.white = makeNoise(ctx, 3, false); A.brown = makeNoise(ctx, 3, true);
+  buildWind(); buildDrone(); buildCrickets();
+  A.nextOwl = ctx.currentTime + mr(10, 25);
+  A.on = true;
+  if (ctx.state === 'suspended') ctx.resume();
+}
+document.addEventListener('visibilitychange', function () { if (!A.ctx) return; if (document.hidden) A.ctx.suspend(); else A.ctx.resume(); });
+
+// 3 seconds of noise, made once and reused by everything. White = hiss. Brown = deep rumble
+// (each sample is the last one plus a little random step, so it wanders slowly = mostly bass).
+function makeNoise(ctx, seconds, brown) {
+  var n = Math.floor(ctx.sampleRate * seconds), b = ctx.createBuffer(1, n, ctx.sampleRate), d = b.getChannelData(0), last = 0;
+  for (var i = 0; i < n; i++) {
+    var w = Math.random() * 2 - 1;
+    if (brown) { last = (last + 0.02 * w) / 1.02; d[i] = last * 3.5; } else d[i] = w;
+  }
+  return b;
+}
+function makePanner(x, y, z, ref) {
+  var p = A.ctx.createPanner();
+  p.panningModel = SN.hrtf ? 'HRTF' : 'equalpower';
+  p.distanceModel = 'inverse'; p.refDistance = ref || 1.5; p.rolloffFactor = 1; p.maxDistance = 100;
+  setPos(p, x, y, z); return p;
+}
+function setPos(p, x, y, z) {   // new browsers use AudioParams, old ones setPosition()
+  if (p.positionX) { p.positionX.value = x; p.positionY.value = y; p.positionZ.value = z; } else p.setPosition(x, y, z);
+}
+function noiseSrc(buf, t, dur) {   // a one-shot slice of noise from a random spot in the buffer
+  var s = A.ctx.createBufferSource(); s.buffer = buf; s.start(t, Math.random() * (buf.duration - 0.5), dur); return s;
+}
+function filt(type, f, q) { var b = A.ctx.createBiquadFilter(); b.type = type; b.frequency.value = f; if (q) b.Q.value = q; return b; }
+function gainNode(v) { var g = A.ctx.createGain(); g.gain.value = v; return g; }
+function chain() { for (var i = 0; i < arguments.length - 1; i++) arguments[i].connect(arguments[i + 1]); return arguments[arguments.length - 1]; }
+
+// ---------- your ears = the camera
+function updateListener() {
+  var L = A.ctx.listener, e = cam.matrixWorld.elements;
+  var px = e[12], py = e[13], pz = e[14], fx = -e[8], fy = -e[9], fz = -e[10], ux = e[4], uy = e[5], uz = e[6];
+  if (L.forwardX) {
+    L.positionX.value = px; L.positionY.value = py; L.positionZ.value = pz;
+    L.forwardX.value = fx; L.forwardY.value = fy; L.forwardZ.value = fz; L.upX.value = ux; L.upY.value = uy; L.upZ.value = uz;
+  } else { L.setPosition(px, py, pz); L.setOrientation(fx, fy, fz, ux, uy, uz); }
+}
+
+/* ---------- WIND
+   A few looping noise "speakers" up in the treetops around you. Each one splits the noise into
+   a low whoosh (bandpass ~400Hz) and a high leafy hiss (~3.8kHz). gust() is a slow wobbly 0..1
+   value; each speaker reads it a few seconds late, so a gust rolls around you from one side to the other. */
+function buildWind() {
+  for (var i = 0; i < SN.wind.sources; i++) {
+    var src = A.ctx.createBufferSource(); src.buffer = A.white; src.loop = true;
+    var lo = filt('bandpass', 400, 0.6), loCut = filt('lowpass', 900), loG = gainNode(0), hi = filt('bandpass', 3800, 0.8), hiG = gainNode(0);
+    var pan = makePanner(0, 0, 0, 4);
+    chain(src, lo, loCut, loG, pan); chain(src, hi, hiG, pan); pan.connect(A.windBus);   // loCut keeps hiss out of the whoosh
+    src.start(0, Math.random() * 2.5);
+    A.wind.push({ ang: i / SN.wind.sources * TAU + 0.4, lo: lo, loG: loG, hi: hi, hiG: hiG, pan: pan, lag: i * 2.3 + Math.random() * 3 });
+  }
+}
+function gust(t) {
+  return clamp(0.5 + 0.25 * Math.sin(t * 0.11) + 0.15 * Math.sin(t * 0.29 + 1.3) + 0.1 * Math.sin(t * 0.71 + 2.1), 0, 1);
+}
+function tickWind(t) {
+  var WS = SN.wind;
+  for (var i = 0; i < A.wind.length; i++) {
+    var w = A.wind[i], g = gust(t - w.lag);
+    w.loG.gain.setTargetAtTime(WS.volume * A.windScale * (0.15 + 0.85 * g), t, 0.4);
+    w.lo.frequency.setTargetAtTime(220 + 520 * g, t, 0.4);                 // stronger gust = higher whoosh
+    w.hiG.gain.setTargetAtTime(WS.rustle * A.windScale * g * g * g, t, 0.3); // leaves only really go in big gusts
+    setPos(w.pan, player.x + Math.cos(w.ang) * WS.distance, player.y + WS.height, player.z + Math.sin(w.ang) * WS.distance);
+  }
+}
+
+/* ---------- DRONE
+   Two sine waves at almost the same pitch (36Hz and 36.5Hz). Played together they "beat":
+   the volume slowly pulses at the difference (~0.5Hz), like something breathing very slowly.
+   Plus quiet harmonics (so small speakers hear SOMETHING) and a brown-noise rumble.
+   It sits 20m under your feet. You can't really locate sub-bass, so it just feels like it's everywhere. */
+function buildDrone() {
+  var ctx = A.ctx, f = SN.drone.freq, mix = gainNode(1);
+  function osc(type, freq, g) { var o = ctx.createOscillator(); o.type = type; o.frequency.value = freq; chain(o, gainNode(g), mix); o.start(); }
+  osc('sine', f, 0.5); osc('sine', f * 1.014, 0.45);
+  osc('sine', f * 2.005, 0.2); osc('triangle', f * 3.01, 0.06);
+  var rumble = ctx.createBufferSource(); rumble.buffer = A.brown; rumble.loop = true;
+  chain(rumble, filt('lowpass', 90), gainNode(0.5), mix); rumble.start();
+  A.droneG = gainNode(0);
+  A.dronePan = makePanner(0, -20, 0, 20); A.dronePan.rolloffFactor = 0;   // rolloff 0 = no fading with distance
+  chain(mix, filt('lowpass', 170), A.droneG, A.dronePan, A.droneBus);
+}
+function tickDrone(t) {
+  var D = SN.drone, level = D.start + (D.max - D.start) * (1 - Math.exp(-A.droneTime / D.rampSeconds));
+  A.droneG.gain.setTargetAtTime(level * (0.85 + 0.15 * Math.sin(t * 0.05)), t, 1.5);
+  setPos(A.dronePan, player.x, player.y - 20, player.z);
+}
+
+/* ---------- CRICKETS
+   Each cricket is one high sine wave (~4-5kHz) that we switch on and off super fast:
+   3-5 pulses of 12ms = one "chirp". We schedule chirps a little ahead of time on the audio
+   clock (way more precise than doing it from the frame loop). Walk away from one and it
+   respawns somewhere else around you. */
+function buildCrickets() {
+  for (var i = 0; i < SN.crickets.count; i++) {
+    var o = A.ctx.createOscillator(); o.frequency.value = mr(4200, 5200);
+    var g = gainNode(0), pan = makePanner(0, 0, 0, 1.5);
+    chain(o, g, pan, A.lifeBus); o.start();
+    var c = { g: g, pan: pan, x: 0, y: 0, z: 0, next: A.ctx.currentTime + mr(0.5, 4), pulses: 3 + Math.floor(Math.random() * 3), rate: mr(0.028, 0.04) };
+    placeCricket(c); A.crickets.push(c);
+  }
+}
+function placeCricket(c) {
+  var a = mr(0, TAU), d = mr(SN.crickets.minDist, SN.crickets.maxDist);
+  c.x = player.x + Math.cos(a) * d; c.z = player.z + Math.sin(a) * d; c.y = groundH(c.x, c.z) + 0.1;
+  setPos(c.pan, c.x, c.y, c.z);
+}
+function tickCrickets(t) {
+  for (var i = 0; i < A.crickets.length; i++) {
+    var c = A.crickets[i], dx = c.x - player.x, dz = c.z - player.z;
+    if (dx * dx + dz * dz > Math.pow(SN.crickets.maxDist + 8, 2)) placeCricket(c);
+    if (t < A.hushUntil) continue;                     // silenced: they wait
+    if (c.next < t) c.next = t + 0.05;
+    while (c.next < t + 0.3) {
+      var g = c.g.gain, amp = SN.crickets.volume;
+      for (var j = 0; j < c.pulses; j++) {
+        var s = c.next + j * c.rate;
+        g.setValueAtTime(0, s); g.linearRampToValueAtTime(amp, s + 0.004); g.linearRampToValueAtTime(0, s + 0.016);
+      }
+      c.next += Math.random() < 0.12 ? mr(2, 6) : mr(0.4, 0.9);   // mostly steady, sometimes a pause
+    }
+  }
+}
+
+/* ---------- OWLS
+   "hoo... hoo-hoo hoooo". Each hoot is a sine around 360Hz that sags slightly in pitch, with
+   a 5Hz vibrato (a little oscillator wobbling the main one's frequency) and some breathy
+   filtered noise on top. Far-away owls get a lowpass filter: air soaks up high frequencies. */
+function hoot(t, dur, f, out) {
+  var ctx = A.ctx, o = ctx.createOscillator();
+  o.frequency.setValueAtTime(f * 1.04, t); o.frequency.exponentialRampToValueAtTime(f * 0.94, t + dur);
+  var vib = ctx.createOscillator(); vib.frequency.value = 5.5; chain(vib, gainNode(f * 0.012), o.frequency);
+  var g = gainNode(0);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(1, t + 0.06); g.gain.setValueAtTime(1, t + dur - 0.1); g.gain.linearRampToValueAtTime(0, t + dur + 0.05);
+  chain(o, g, out);
+  var n = noiseSrc(A.white, t, dur + 0.1), ng = gainNode(0);
+  ng.gain.setValueAtTime(0, t); ng.gain.linearRampToValueAtTime(0.5, t + 0.08); ng.gain.linearRampToValueAtTime(0, t + dur + 0.05);
+  chain(n, filt('bandpass', f, 4), ng, out);
+  o.start(t); o.stop(t + dur + 0.1); vib.start(t); vib.stop(t + dur + 0.1);
+}
+function playOwl(x, y, z) {
+  if (!A.on) return;
+  var t = A.ctx.currentTime + 0.05, d = Math.sqrt((x - player.x) * (x - player.x) + (z - player.z) * (z - player.z));
+  var out = gainNode(SN.owls.volume), pan = makePanner(x, y, z, 6);
+  chain(out, filt('lowpass', clamp(5000 - d * 110, 900, 5000)), pan, A.lifeBus);
+  var f0 = mr(330, 400), notes = Math.random() < 0.6 ? [[0, 0.5], [0.8, 0.22], [1.08, 0.22], [1.45, 0.75]] : [[0, 0.65], [1.0, 0.9]];
+  for (var k = 0; k < notes.length; k++) hoot(t + notes[k][0], notes[k][1], f0 * (k === notes.length - 1 ? 0.97 : 1), out);
+}
+function tickOwls(t) {
+  if (t < A.nextOwl) return;
+  A.nextOwl = t + mr(SN.owls.minGap, SN.owls.maxGap);
+  if (t < A.hushUntil) return;
+  var a = mr(0, TAU), d = mr(SN.owls.minDist, SN.owls.maxDist);
+  playOwl(player.x + Math.cos(a) * d, player.y + mr(6, 12), player.z + Math.sin(a) * d);
+}
+
+/* ---------- FOOTSTEPS
+   One step = (1) a soft low thump: the weight of your foot, and (2) a crunch: a burst of tiny
+   noise clicks through a bandpass filter. Leaves = lots of bright clicks spread over ~160ms
+   (dry leaves crackle). Dirt path = a few duller, lower clicks. Left/right feet alternate
+   13cm apart, below your head, so HRTF puts them under you. */
+function playFootstep(weight) {
+  if (!A.on) return;
+  var ctx = A.ctx, t = ctx.currentTime + 0.01;
+  A.footSide = -A.footSide;
+  var fx = player.x - player.dz * 0.13 * A.footSide, fz = player.z + player.dx * 0.13 * A.footSide;
+  var pa = pathAt(fx, fz), dirt = pa.mask * pa.vis > 0.35;
+  var pan = makePanner(fx, player.y + 0.05, fz, 1.2); pan.connect(A.stepBus);
+  var w = weight * mr(0.8, 1.1);
+  // 1) thump
+  var th = noiseSrc(A.brown, t, 0.25), thg = gainNode(0);
+  thg.gain.setValueAtTime(0, t); thg.gain.linearRampToValueAtTime(0.9 * w, t + 0.008); thg.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
+  chain(th, filt('lowpass', dirt ? 260 : 200), thg, pan);
+  // 2) crunch
+  var bp = filt('bandpass', dirt ? mr(700, 1300) : mr(2000, 3800), dirt ? 0.9 : 0.7); bp.connect(pan);
+  var n = Math.round((dirt ? mr(3, 6) : mr(8, 15)) * (0.5 + 0.5 * weight));
+  for (var k = 0; k < n; k++) {
+    var tt = t + 0.006 + Math.pow(Math.random(), 1.6) * (dirt ? 0.09 : 0.16);
+    var s = noiseSrc(A.white, tt, 0.03), g = gainNode(0), amp = mr(0.15, 1) * w * (dirt ? 0.9 : 1.3);
+    g.gain.setValueAtTime(amp, tt); g.gain.exponentialRampToValueAtTime(0.001, tt + mr(0.006, 0.022));
+    chain(s, g, bp);
+  }
+  // 3) twig? (only on real steps, not the stopping scuff)
+  if (weight > 0.6 && (nearStick(fx, fz) || Math.random() < SN.steps.hiddenTwigChance * (dirt ? 0.3 : 1)))
+    playTwig(fx, player.y + 0.03, fz, SN.steps.twigVolume);
+}
+function nearStick(x, z) {
+  var S = SETS.stick, r2 = SN.steps.twigRadius * SN.steps.twigRadius;
+  for (var i = 0; i < S.n; i++) { var dx = wrapD(S.ax[i] - x), dz = wrapD(S.az[i] - z); if (dx * dx + dz * dz < r2) return true; }
+  return false;
+}
+
+/* ---------- TWIG SNAP (stage 3 reuses this for snaps BEHIND you...)
+   A snap = an ultra-short high click + a ringing "tok" (bandpass with high Q = it resonates
+   like a stick of wood) + a little low body. Sometimes it breaks twice. */
+function playTwig(x, y, z, vol, bus) {
+  if (!A.on) return;
+  var t = A.ctx.currentTime + 0.01, pan = makePanner(x, y, z, 1.5); pan.connect(bus || A.sfxBus);
+  var cracks = 1 + (Math.random() < 0.45 ? 1 : 0) + (Math.random() < 0.15 ? 1 : 0), tt = t;
+  for (var c = 0; c < cracks; c++) {
+    var amp = vol * mr(0.6, 1) * (c ? 0.6 : 1);
+    var g1 = gainNode(0); g1.gain.setValueAtTime(amp, tt); g1.gain.exponentialRampToValueAtTime(0.001, tt + 0.012);
+    chain(noiseSrc(A.white, tt, 0.05), filt('highpass', 1500), g1, pan);
+    var g2 = gainNode(0); g2.gain.setValueAtTime(amp * 3, tt); g2.gain.exponentialRampToValueAtTime(0.001, tt + 0.05);
+    chain(noiseSrc(A.white, tt, 0.08), filt('bandpass', mr(1400, 2800), 6), g2, pan);
+    var g3 = gainNode(0); g3.gain.setValueAtTime(amp * 0.6, tt); g3.gain.exponentialRampToValueAtTime(0.001, tt + 0.07);
+    chain(noiseSrc(A.brown, tt, 0.1), filt('lowpass', 500), g3, pan);
+    tt += mr(0.03, 0.09);
+  }
+}
+
+/* ---------- THE SILENCE
+   hush(seconds): every cricket and owl stops at once, then they creep back one by one.
+   The wind drops too, but never fully: total silence sounds broken, near-silence sounds WRONG.
+   The stage-4 scare director will call this right before something happens. Press H to try it. */
+function hush(seconds) {
+  if (!A.on) return;
+  var t = A.ctx.currentTime, g = A.lifeBus.gain, H = SN.hush;
+  A.hushUntil = t + seconds;
+  g.cancelScheduledValues(t); g.setValueAtTime(g.value, t); g.linearRampToValueAtTime(0, t + H.fadeOut);
+  g.setValueAtTime(0, t + seconds); g.linearRampToValueAtTime(1, t + seconds + H.fadeIn);
+  for (var i = 0; i < A.crickets.length; i++) A.crickets[i].next = A.hushUntil + mr(0.3, H.fadeIn);   // come back one at a time
+}
+function isHushed() { return A.on && A.ctx.currentTime < A.hushUntil; }
+
+// ---------- per frame: ears follow your head; everything else updates 10x a second
+function updateAudio(dt, vr) {
+  updateListener();
+  if (player.speed > 0.3) A.droneTime += dt; else A.droneTime = Math.max(0, A.droneTime - dt * SN.drone.recover);
+  A.tick -= dt; if (A.tick > 0) return; A.tick = 0.1;
+  var t = A.ctx.currentTime;
+  A.windScale += ((isHushed() ? 0.5 : 1) - A.windScale) * 0.15;
+  tickWind(t); tickDrone(t); tickCrickets(t); tickOwls(t);
+}
+
+/* ============================================================
+   WATCHER LAB
+   Five candidate designs. Each one is built from "limbs" (tapered cylinders
+   between two joint points) and "blobs" (squashed spheres), so a pose is just
+   a list of joint positions. Units are metres, feet at y=0, facing +z (toward you).
+   In the real game the chosen one gets merged into one mesh = one draw call.
+   ============================================================ */
+var LAB = { type: 0, distI: 1, pose: 0, look: 'clay', eyes: true, figs: [], labelT: -9 };
+var LAB_DISTS = [6, 10, 15, 20];
+var LOOKS = [['ps1', 'clay', true], ['ps1', 'void', true], ['ps1', 'shaded', true], ['ps2', 'clay', true], ['ps2', 'void', true], ['ps2', 'shaded', true],
+  ['ps1', 'void', false], ['ps1', 'shaded', false], ['ps2', 'void', false], ['ps2', 'shaded', false]];
+var LOOK_ORDER = ['clay', 'void', 'shaded'];
+function labCycleLook() { LAB.look = LOOK_ORDER[(LOOK_ORDER.indexOf(LAB.look) + 1) % 3]; labRefresh(); }
+var EYE_COL = new T.Color('#e6ffd0');   // eyeshine: pale green-white, like an animal's eyes in torchlight
+var eyeGeo = new T.SphereGeometry(0.014, 6, 4);
+var _a = new T.Vector3(), _b = new T.Vector3(), _c = new T.Vector3();
+
+function Fig() { this.g = new T.Group(); this.eyes = []; this.eyeMid = new T.Vector3(); }
+function limb(f, a, b, r0, r1, kind) {
+  _a.fromArray(a); _b.fromArray(b);
+  var m = new T.Mesh(new T.CylinderGeometry(r1, r0, _a.distanceTo(_b), 6, 1));
+  m.position.copy(_a).add(_b).multiplyScalar(0.5);
+  m.quaternion.setFromUnitVectors(UP, _c.copy(_b).sub(_a).normalize());
+  m.userData.kind = kind || 'body'; f.g.add(m); return m;
+}
+// a chain of limbs through several joints, tapering from r0 to r1, with a little ball at each joint
+function chainL(f, pts, r0, r1, kind) {
+  for (var i = 0; i < pts.length - 1; i++) {
+    var ra = r0 + (r1 - r0) * i / (pts.length - 1), rb = r0 + (r1 - r0) * (i + 1) / (pts.length - 1);
+    limb(f, pts[i], pts[i + 1], ra, rb, kind);
+    if (i > 0) blob(f, pts[i], [ra, ra, ra], 0, kind);
+  }
+}
+function blob(f, p, s, rz, kind) {
+  var m = new T.Mesh(new T.IcosahedronGeometry(1, 1));
+  m.position.fromArray(p); m.scale.set(s[0], s[1], s[2]); m.rotation.z = rz || 0;
+  m.userData.kind = kind || 'body'; f.g.add(m); return m;
+}
+// two eyes on a head at h, tilted by tilt (radians, sideways), sep apart, fwd in front of the head centre
+function eyes(f, h, tilt, sep, fwd) {
+  for (var s = -1; s <= 1; s += 2) {
+    var x = s * sep, y = 0.012;
+    var m = new T.Mesh(eyeGeo, new T.MeshBasicMaterial({ color: '#000000', fog: false }));
+    m.position.set(h[0] + x * Math.cos(tilt) - y * Math.sin(tilt), h[1] + x * Math.sin(tilt) + y * Math.cos(tilt), h[2] + fwd);
+    m.userData.kind = 'eye'; f.g.add(m); f.eyes.push(m);
+  }
+  f.eyeMid.set(h[0], h[1], h[2] + fwd);
+}
+// a few thin fingers hanging from a hand
+function fingers(f, hand, len, spread, kind, up) {
+  for (var k = -1; k <= 1; k++) {
+    var dir = up ? 1 : -1;
+    limb(f, hand, [hand[0] + k * spread, hand[1] + dir * len * (1 - Math.abs(k) * 0.15), hand[2] + 0.02 * (1 - Math.abs(k))], 0.011, 0.006, kind);
+  }
+}
+function mirror(p) { return [-p[0], p[1], p[2]]; }
+function mirrorAll(pts) { return pts.map(mirror); }
+function rotZ(p, c, a) {   // rotate point p around centre c by angle a in the xy plane (for tilting a head + antlers)
+  var x = p[0] - c[0], y = p[1] - c[1];
+  return [c[0] + x * Math.cos(a) - y * Math.sin(a), c[1] + x * Math.sin(a) + y * Math.cos(a), p[2]];
+}
+
+var LAB_TYPES = [
+  { name: 'THE STILT', info: 'About 2.5m. Thin as the trunks, tiny tilted head, fingers almost touching the ferns. The sketch from before. Pose B: head cranked the other way, one arm reaching toward you.',
+    build: function (f, pose) {
+      var tilt = pose ? -0.55 : 0.3, head = [tilt * 0.14, 2.31, 0.02];
+      chainL(f, [[0, 1.12, 0], [0, 1.6, 0.01], [0, 2.05, 0]], 0.08, 0.1);
+      blob(f, [0, 1.84, 0], [0.16, 0.27, 0.09]); blob(f, [0, 1.15, 0], [0.12, 0.1, 0.08]);
+      limb(f, [0, 2.05, 0], [head[0] * 0.5, 2.22, 0.01], 0.035, 0.032);
+      blob(f, head, [0.085, 0.12, 0.095], tilt); eyes(f, head, tilt, 0.032, 0.085);
+      var L = [[-0.17, 2.02, 0], [-0.21, 1.45, 0.03], [-0.23, 0.42, 0.06]];
+      chainL(f, L, 0.032, 0.022); fingers(f, L[2], 0.3, 0.02);
+      var R = pose ? [[0.17, 2.02, 0], [0.3, 1.62, 0.32], [0.34, 1.2, 0.72]] : mirrorAll(L);
+      chainL(f, R, 0.032, 0.022); fingers(f, R[2], 0.28, 0.02);
+      for (var s = -1; s <= 1; s += 2) { chainL(f, [[s * 0.08, 1.12, 0], [s * 0.09, 0.58, 0.04], [s * 0.09, 0.06, 0]], 0.05, 0.03); blob(f, [s * 0.09, 0.03, 0.06], [0.04, 0.03, 0.09]); }
+    } },
+  { name: 'THE SNAG', info: 'Pretends to be a dead tree. Bark skin, root legs, branch arms with twig fingers, a knot for a face. You walk past it ten times before you notice. Pose B: one "branch" has come down.',
+    build: function (f, pose) {
+      chainL(f, [[0, -0.1, 0], [0.03, 1.2, 0], [0.06, 2.2, 0.02], [0.04, 2.6, 0]], 0.2, 0.1, 'bark');
+      for (var s = -1; s <= 1; s += 2) limb(f, [s * 0.08, 0.9, 0], [s * 0.22, -0.05, 0.06], 0.09, 0.07, 'bark');
+      limb(f, [0.05, 1.3, 0], [0.32, 1.45, 0.05], 0.035, 0.015, 'bark'); limb(f, [0.03, 0.95, 0], [-0.28, 1.05, -0.05], 0.03, 0.012, 'bark');
+      var head = [0.07, 2.42, 0.1]; blob(f, head, [0.1, 0.13, 0.08], 0.2, 'bark'); eyes(f, head, 0.2, 0.03, 0.075);
+      var L = [[-0.12, 2.15, 0], [-0.5, 2.5, 0.05], [-0.72, 3.0, 0.1]];
+      chainL(f, L, 0.06, 0.025, 'bark');
+      limb(f, L[2], [-0.95, 3.2, 0.12], 0.02, 0.006, 'bark'); limb(f, L[2], [-0.7, 3.35, 0.05], 0.02, 0.006, 'bark'); limb(f, L[2], [-0.85, 2.95, 0.25], 0.015, 0.005, 'bark');
+      if (pose) {
+        var D = [[0.12, 2.1, 0], [0.22, 1.4, 0.12], [0.25, 0.5, 0.18]];
+        chainL(f, D, 0.055, 0.025, 'bark'); fingers(f, D[2], 0.4, 0.03, 'bark');
+      } else {
+        var R = [[0.12, 2.1, 0], [0.55, 2.35, 0.05], [0.88, 2.7, 0.12]];
+        chainL(f, R, 0.055, 0.025, 'bark');
+        limb(f, R[2], [1.1, 2.82, 0.1], 0.02, 0.006, 'bark'); limb(f, R[2], [0.98, 3.0, 0.15], 0.018, 0.006, 'bark');
+      }
+    } },
+  { name: 'THE HUNCHED', info: 'Bent double, head hanging lower than its shoulders, knuckles on the ground. 2.2m even folded up, so standing straight would be nearly 3m. Pose B: the head has lifted to look at you.',
+    build: function (f, pose) {
+      chainL(f, [[0, 1.0, -0.05], [0, 1.45, 0.08], [0, 1.86, 0.28]], 0.09, 0.11);
+      blob(f, [0, 1.8, 0.16], [0.21, 0.17, 0.17]); blob(f, [0, 1.02, -0.05], [0.13, 0.11, 0.09]);
+      var head = pose ? [0.03, 1.92, 0.56] : [0, 1.64, 0.55], tilt = pose ? 0.45 : 0;
+      limb(f, [0, 1.86, 0.3], pose ? [0.01, 1.88, 0.5] : [0, 1.74, 0.5], 0.04, 0.035);
+      blob(f, head, [0.085, 0.11, 0.095], tilt); eyes(f, head, tilt, 0.03, 0.085);
+      for (var s = -1; s <= 1; s += 2) {
+        var arm = [[s * 0.2, 1.82, 0.28], [s * 0.27, 1.15, 0.38], [s * 0.25, 0.22, 0.45]];
+        chainL(f, arm, 0.035, 0.024); fingers(f, arm[2], 0.2, 0.025);
+        chainL(f, [[s * 0.1, 1.0, -0.05], [s * 0.13, 0.55, 0.22], [s * 0.12, 0.05, -0.02]], 0.055, 0.032);
+        blob(f, [s * 0.12, 0.03, 0.04], [0.045, 0.03, 0.1]);
+      }
+    } },
+  { name: 'THE CROWNED', info: 'A thin body wearing a crown of branches that pushes it past 3m. In shaded mode the antlers are pale bone, so they catch your torch and float in the dark. Pose B: the whole head tips sideways, antlers and all.',
+    build: function (f, pose) {
+      var hc = [0, 2.2, 0.02], tilt = pose ? 0.45 : 0.08;
+      function R(p) { return rotZ(p, hc, tilt); }
+      chainL(f, [[0, 1.05, 0], [0, 1.5, 0.01], [0, 1.95, 0]], 0.09, 0.11);
+      blob(f, [0, 1.75, 0], [0.18, 0.25, 0.1]); blob(f, [0, 1.07, 0], [0.13, 0.1, 0.09]);
+      limb(f, [0, 1.95, 0], [0, 2.1, 0.01], 0.04, 0.037);
+      blob(f, hc, [0.09, 0.12, 0.1], tilt); eyes(f, hc, tilt, 0.033, 0.09);
+      for (var s = -1; s <= 1; s += 2) {
+        var beam = [R([s * 0.04, 2.3, 0]), R([s * 0.25, 2.6, -0.02]), R([s * 0.42, 2.95, 0.02]), R([s * 0.48, 3.22, 0])];
+        chainL(f, beam, 0.03, 0.012, 'bone');
+        limb(f, beam[1], R([s * 0.16, 2.88, 0.06]), 0.016, 0.006, 'bone');
+        limb(f, beam[2], R([s * 0.64, 3.06, 0.03]), 0.014, 0.005, 'bone');
+        limb(f, beam[2], R([s * 0.33, 3.15, -0.03]), 0.013, 0.005, 'bone');
+        var arm = [[s * 0.19, 1.92, 0], [s * 0.23, 1.38, 0.03], [s * 0.24, 0.72, 0.06]];
+        chainL(f, arm, 0.035, 0.025); fingers(f, arm[2], 0.32, 0.022);
+        chainL(f, [[s * 0.09, 1.05, 0], [s * 0.1, 0.55, 0.04], [s * 0.1, 0.06, 0]], 0.055, 0.035);
+        blob(f, [s * 0.1, 0.03, 0.06], [0.045, 0.03, 0.09]);
+      }
+    } },
+  { name: 'THE VISITOR', info: 'Just a person in a long coat and a hood. Arms at its sides. Slightly too tall, slightly too long in the neck, and completely still. Pose B: one hand up, frozen mid-wave.',
+    build: function (f, pose) {
+      for (var s = -1; s <= 1; s += 2) limb(f, [s * 0.09, 0.5, 0], [s * 0.09, 0.0, 0.02], 0.05, 0.045);
+      var coat = new T.Mesh(new T.CylinderGeometry(0.2, 0.33, 1.25, 8, 1)); coat.position.set(0, 1.05, 0); coat.userData.kind = 'body'; f.g.add(coat);
+      blob(f, [0, 1.66, 0], [0.24, 0.09, 0.13]);
+      limb(f, [0, 1.7, 0], [0, 1.88, 0.01], 0.05, 0.045);
+      var head = [0, 1.99, -0.01], tilt = pose ? -0.3 : 0;
+      blob(f, head, [0.13, 0.16, 0.14], tilt); blob(f, [head[0], head[1] - 0.12, head[2] + 0.02], [0.15, 0.06, 0.12]);
+      eyes(f, [head[0], head[1] - 0.01, head[2]], tilt, 0.032, 0.115);
+      var L = [[-0.24, 1.62, 0], [-0.27, 1.2, 0.02], [-0.27, 0.82, 0.03]];
+      chainL(f, L, 0.055, 0.045); blob(f, [-0.27, 0.76, 0.04], [0.035, 0.06, 0.03]);
+      if (pose) {
+        var W = [[0.24, 1.62, 0], [0.42, 1.72, 0.08], [0.44, 2.08, 0.12]];
+        chainL(f, W, 0.055, 0.045); blob(f, [0.44, 2.14, 0.12], [0.04, 0.06, 0.02]);
+        for (var k = -1.5; k <= 1.5; k += 1) limb(f, [0.44 + k * 0.018, 2.18, 0.12], [0.44 + k * 0.03, 2.28, 0.12], 0.008, 0.006);
+      } else { chainL(f, mirrorAll(L), 0.055, 0.045); blob(f, [0.27, 0.76, 0.04], [0.035, 0.06, 0.03]); }
+    } }
+];
+
+// ---------- materials. CLAY = light grey and faintly self-lit, for judging the SHAPE (not how it plays).
+// VOID = pure black, unlit, no fog: a hole in the world.
+// SHADED = very dark but lit by your torch, so you catch a hint of shape (in the style's shader).
+var labMats = {};
+function labMat(kind) {
+  var key = styleKey + '|' + LAB.look + '|' + kind;
+  if (labMats[key]) return labMats[key];
+  var po = style.patch, m;
+  if (LAB.look === 'void') m = patch(new T.MeshBasicMaterial({ color: '#000000', fog: false }), { snap: !!po.snap });
+  else if (LAB.look === 'clay') {
+    var cc = { body: '#9a968c', bark: '#8a7a66', bone: '#d8d0c0' }[kind];
+    m = patch(new T.MeshLambertMaterial({ color: new T.Color(cc), emissive: new T.Color(cc).multiplyScalar(0.35), flatShading: true }),
+      { snap: !!po.snap, dither: po.dither || 0, radialFog: true });
+  } else {
+    var col = { body: '#17140f', bark: '#3a3128', bone: '#9a8f7c' }[kind];
+    var tex = (kind === 'bark' && style.tex) ? detailTex('bark', style.tex.size, style.tex.nearest, [1, 2]) : null;
+    var p = { color: new T.Color(col), flatShading: true }; if (tex) p.map = tex;
+    m = patch(new T.MeshLambertMaterial(p), { snap: !!po.snap, affine: !!po.affine && !!tex, dither: po.dither || 0, radialFog: true });
+  }
+  labMats[key] = m; return m;
+}
+function labApplyMats() {
+  for (var i = 0; i < LAB.figs.length; i++) LAB.figs[i].g.traverse(function (o) {
+    if (o.isMesh && o.userData.kind !== 'eye') o.material = labMat(o.userData.kind);
+    if (o.isMesh && o.userData.kind === 'eye') o.visible = LAB.eyes;
+  });
+}
+
+// ---------- spawning: in front of wherever you're looking, at the chosen distance
+function labSpawn() {
+  var i;
+  for (i = 0; i < LAB.figs.length; i++) { scene.remove(LAB.figs[i].g); LAB.figs[i].g.traverse(function (o) { if (o.isMesh && o.geometry !== eyeGeo) o.geometry.dispose(); }); }
+  LAB.figs = [];
+  // its own vector: limb() uses _a as scratch, so storing the direction there got scrambled mid-build
+  var dir = new T.Vector3(); cam.getWorldDirection(dir); dir.y = 0;
+  if (dir.lengthSq() < 1e-4) dir.set(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
+  dir.normalize();
+  var d = LAB_DISTS[LAB.distI], list = LAB.type === 0 ? [0, 1, 2, 3, 4] : [LAB.type - 1];
+  for (i = 0; i < list.length; i++) {
+    var ang = LAB.type === 0 ? (2 - i) * Math.min(0.32, 2.6 / d) : 0;   // positive angle = to your left, so 1 ends up leftmost
+    var fx = dir.x * Math.cos(ang) + dir.z * Math.sin(ang), fz = -dir.x * Math.sin(ang) + dir.z * Math.cos(ang);
+    var f = new Fig(); LAB_TYPES[list[i]].build(f, LAB.pose);
+    var x = player.x + fx * d, z = player.z + fz * d;
+    f.g.position.set(x, groundH(x, z), z);
+    scene.add(f.g); LAB.figs.push(f);
+  }
+  labRefresh();
+}
+function labRefresh() { labApplyMats(); LAB.labelT = U.uTime.value; fpsDirty = true; labPanel(); }
+function labSetType(n) { LAB.type = n; labSpawn(); }
+function labNextType() { labSetType((LAB.type + 1) % 6); }
+function labTogglePose() { LAB.pose = 1 - LAB.pose; labSpawn(); }
+function labNextDist() { LAB.distI = (LAB.distI + 1) % LAB_DISTS.length; labSpawn(); }
+function labNextLook() {
+  var cur = 0;
+  for (var i = 0; i < LOOKS.length; i++) if (LOOKS[i][0] === styleKey && LOOKS[i][1] === LAB.look && LOOKS[i][2] === LAB.eyes) cur = i;
+  var L = LOOKS[(cur + 1) % LOOKS.length];
+  if (L[0] !== styleKey) applyStyle(L[0]);
+  LAB.look = L[1]; LAB.eyes = L[2]; labRefresh();
+}
+function labLabel() {
+  return (LAB.type ? LAB_TYPES[LAB.type - 1].name : 'LINEUP') + ' ' + (LAB.pose ? 'B' : 'A') + ' ' + LAB_DISTS[LAB.distI] + 'm ' +
+    style.name + ' ' + LAB.look.toUpperCase() + (LAB.eyes ? ' EYES' : '');
+}
+
+// ---------- per frame: everything turns to face you (instantly: it never visibly moves),
+// and eyes light up only when your torch beam is on them, fading with distance.
+var _eyeW = new T.Vector3(), _camP = new T.Vector3(), _camF = new T.Vector3();
+function updateLab(t) {
+  if (!LAB.figs.length) return;
+  _camP.setFromMatrixPosition(cam.matrixWorld); cam.getWorldDirection(_camF);
+  var cone0 = Math.cos(FL.angle + 0.12), cone1 = Math.cos(FL.angle * 0.5), torch = flash.intensity / Math.max(0.01, flashBase);
+  for (var i = 0; i < LAB.figs.length; i++) {
+    var f = LAB.figs[i], g = f.g;
+    g.rotation.y = Math.atan2(player.x - g.position.x, player.z - g.position.z);
+    if (!LAB.eyes || !f.eyes.length) continue;
+    g.updateMatrixWorld(); _eyeW.copy(f.eyeMid).applyMatrix4(g.matrixWorld).sub(_camP);
+    var dist = _eyeW.length(), lit = smoothstep(cone0, cone1, _eyeW.divideScalar(dist).dot(_camF)) * Math.sqrt(clamp(1 - dist / FL.range, 0, 1)) * torch;
+    for (var k = 0; k < f.eyes.length; k++) f.eyes[k].material.color.copy(EYE_COL).multiplyScalar(0.015 + 1.3 * lit);
+  }
+}
+
+// ---------- desktop panel
+function labPanel() {
+  var h = '', i;
+  h += '<button class="' + (LAB.type === 0 ? 'on' : '') + '" data-a="t0">0 LINEUP</button>';
+  for (i = 0; i < LAB_TYPES.length; i++) h += '<button class="' + (LAB.type === i + 1 ? 'on' : '') + '" data-a="t' + (i + 1) + '">' + (i + 1) + ' ' + LAB_TYPES[i].name.replace('THE ', '') + '</button>';
+  document.getElementById('labTypes').innerHTML = h;
+  h = 'DISTANCE (Z) ';
+  for (i = 0; i < LAB_DISTS.length; i++) h += '<button class="' + (LAB.distI === i ? 'on' : '') + '" data-a="d' + i + '">' + LAB_DISTS[i] + 'm</button>';
+  document.getElementById('labDist').innerHTML = h;
+  document.getElementById('labLook').innerHTML =
+    '<button class="' + (styleKey === 'ps1' ? 'on' : '') + '" data-a="sps1">PS1</button><button class="' + (styleKey === 'ps2' ? 'on' : '') + '" data-a="sps2">PS2</button> (P) ' +
+    '<button data-a="v">' + LAB.look.toUpperCase() + ' (V)</button><button data-a="e">EYES ' + (LAB.eyes ? 'ON' : 'OFF') + ' (E)</button><button data-a="b">POSE ' + (LAB.pose ? 'B' : 'A') + ' (B)</button>';
+  document.getElementById('labInfo').innerHTML = LAB.type ? LAB_TYPES[LAB.type - 1].info :
+    'All five in a row, left to right: Stilt, Snag, Hunched, Crowned, Visitor. They spawn where you are looking and always face you. Walk around them. Try 15m and 20m: that\'s where the real game spawns them.';
+}
+document.getElementById('lab').addEventListener('click', function (e) {
+  var a = e.target.getAttribute && e.target.getAttribute('data-a'); if (!a) return;
+  if (a[0] === 't') labSetType(parseInt(a.slice(1), 10));
+  else if (a[0] === 'd') { LAB.distI = parseInt(a.slice(1), 10); labSpawn(); }
+  else if (a[0] === 's') { applyStyle(a.slice(1)); labRefresh(); }
+  else if (a === 'v') labCycleLook();
+  else if (a === 'e') { LAB.eyes = !LAB.eyes; labRefresh(); }
+  else if (a === 'b') labTogglePose();
+  e.stopPropagation();
+});
+
+/* ============================================================
+   LOOP
+   ============================================================ */
+var lastT = 0, frames = 0, fpsT = 0, calls = 0, tris = 0, lastFps = 0, fpsDirty = false;
+function grabInfo() { calls = renderer.info.render.calls; tris = renderer.info.render.triangles; }
+function loop(time) {
+  var t = time / 1000, dt = clamp(t - lastT, 0, 0.05); lastT = t;
+  var vr = renderer.xr.isPresenting;
+  U.uTime.value = t;
+  updateWalk(dt, t, vr);
+  updateFlashlight(t, dt);
+  if (A.on) updateAudio(dt, vr);
+  worldUpdate();
+  sky.position.copy(dolly.position);
+  hud.visible = vr;   // in the lab the VR label is always on: what you're looking at + fps
+  updateLab(t);
+  frames++;
+  if (time - fpsT > 1000 || fpsDirty) {
+    if (time - fpsT > 1000) { lastFps = Math.round(frames * 1000 / (time - fpsT)); frames = 0; fpsT = time; }
+    fpsDirty = false; var fps = lastFps;
+    drawFps(labLabel() + '  ' + fps + 'fps');
+  }
+  if (vr) { renderer.render(scene, cam); grabInfo(); return; }
+  var rt = style.smooth ? rtL : rtN;
+  renderer.setRenderTarget(rt); renderer.render(scene, cam); grabInfo(); renderer.setRenderTarget(null);
+  quadMat.uniforms.tDiffuse.value = rt.texture;
+  renderer.render(quadScene, quadCam);
+}
+
+// expose a few things for testing in the console (and for later stages)
+window.TREELINE = { CONFIG: CONFIG, player: player, flicker: flicker, scene: scene, sets: sets, applyStyle: applyStyle,
+  audio: A, hush: hush, playTwig: playTwig, playOwl: playOwl, playFootstep: playFootstep };
+
+applyStyle(CONFIG.style);
+worldUpdate();
+renderer.setAnimationLoop(loop);
+})();
+</script>
+</body>
+</html>
